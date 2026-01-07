@@ -1,4 +1,4 @@
-const API_URL = 'http://localhost:3000';
+const API_URL = 'https://smart-attendance-api-zp23.onrender.com';
 
 export async function apiRequest(endpoint: string, method: string = 'GET', body?: any) {
     const headers = {
