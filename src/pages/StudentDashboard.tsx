@@ -187,7 +187,25 @@ export default function StudentDashboard() {
                                 className="glass-panel"
                                 style={{ padding: '2rem', height: 'fit-content' }}
                             >
-                                <h3 style={{ marginTop: 0, fontSize: '1.5rem' }}>Entry Authorization</h3>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <h3 style={{ marginTop: 0, fontSize: '1.5rem', marginBottom: 0 }}>Entry Authorization</h3>
+                                    <button onClick={() => {
+                                        navigator.geolocation.getCurrentPosition(
+                                            (pos) => {
+                                                setLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude });
+                                                if (selectedSession) {
+                                                    const d = getDistance(pos.coords.latitude, pos.coords.longitude, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon);
+                                                    setDistance(d);
+                                                }
+                                                alert("Location Refreshed!");
+                                            },
+                                            (err) => alert("GPS Error: " + err.message),
+                                            { enableHighAccuracy: true }
+                                        );
+                                    }} style={{ background: 'transparent', border: '1px solid var(--accent-color)', color: 'var(--accent-color)', borderRadius: '8px', padding: '4px 8px', cursor: 'pointer', fontSize: '0.8rem' }}>
+                                        Refresh GPS
+                                    </button>
+                                </div>
                                 <p style={{ color: '#94a3b8', marginBottom: '2rem' }}>Verify your location to proceed.</p>
 
                                 <div style={{ marginBottom: '2rem', padding: '1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
