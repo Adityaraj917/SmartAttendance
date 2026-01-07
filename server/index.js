@@ -166,7 +166,8 @@ app.post('/attendance/mark', (req, res) => {
     }
     // Re-read mandatory logic: "Attendance must be marked ONLY if ALL are satisfied: Geofencing validation"
     // I will enforce it. User can mock the correct location.
-    if (distance > session.classroomLocation.radius + 20) { // 20m buffer for GPS accuracy
+    // INCREASED BUFFER FOR DEMO: 100m to account for poor indoor GPS
+    if (distance > session.classroomLocation.radius + 100) {
         return res.status(400).json({ success: false, message: `You are too far from class. Dist: ${Math.round(distance)}m` });
     }
 

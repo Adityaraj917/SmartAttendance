@@ -219,7 +219,6 @@ export default function StudentDashboard() {
                                 {!scanning ? (
                                     <button
                                         className="btn-primary"
-                                        disabled={!distance || distance > selectedSession.classroomLocation.radius + 50}
                                         onClick={startScanner}
                                         style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px' }}
                                     >
