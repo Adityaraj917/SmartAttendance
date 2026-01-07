@@ -40,6 +40,8 @@ export default function TeacherDashboard() {
         apiRequest('/classrooms').then(setClassrooms).catch(console.error);
     }, []);
 
+    const [useMyLocation, setUseMyLocation] = useState(true);
+
     useEffect(() => {
         if (!session) return;
         const interval = setInterval(async () => {
@@ -56,11 +58,28 @@ export default function TeacherDashboard() {
     const createSession = async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
+
+        let lat, lon;
+        if (useMyLocation) {
+            try {
+                const pos: any = await new Promise((resolve, reject) => {
+                    navigator.geolocation.getCurrentPosition(resolve, reject);
+                });
+                lat = pos.coords.latitude;
+                lon = pos.coords.longitude;
+            } catch (err) {
+                console.error("Location access denied, flowing back to classroom default");
+                alert("Could not get your location. Using default classroom coordinates.");
+            }
+        }
+
         try {
             const res = await apiRequest('/session/create', 'POST', {
                 teacherId: user?.id,
                 classroomId: selectedClassId,
-                subject
+                subject,
+                lat,
+                lon
             });
             if (res.success) setSession(res.session);
         } catch (e) { alert('Failed to create session'); } finally { setLoading(false); }
@@ -126,6 +145,21 @@ export default function TeacherDashboard() {
                                     </select>
                                 </div>
                             </div>
+                            <div style={{ marginBottom: '1.5rem' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={useMyLocation}
+                                        onChange={e => setUseMyLocation(e.target.checked)}
+                                        style={{ width: '20px', height: '20px' }}
+                                    />
+                                    <span style={{ fontSize: '0.95rem', color: '#f8fafc' }}>Use my current location as class center</span>
+                                </label>
+                                <p style={{ margin: '5px 0 0 32px', fontSize: '0.8rem', color: '#94a3b8' }}>
+                                    (Overrides the classroom default coordinates)
+                                </p>
+                            </div>
+
                             <div style={{ marginBottom: '2.5rem' }}>
                                 <label style={{ display: 'block', marginBottom: '10px', color: '#94a3b8', fontSize: '0.9rem', fontWeight: 500 }}>Subject Name</label>
                                 <input type="text" style={{ fontSize: '1.1rem', fontWeight: 600 }} placeholder="e.g. Advanced AI Systems" value={subject} onChange={e => setSubject(e.target.value)} required />

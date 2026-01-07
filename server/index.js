@@ -70,14 +70,19 @@ app.get('/sessions/active', (req, res) => {
 });
 
 // Teacher: Create Session
+// Teacher: Create Session
 app.post('/session/create', (req, res) => {
-    const { teacherId, classroomId, subject } = req.body;
+    const { teacherId, classroomId, subject, lat, lon } = req.body;
 
     const selectedClassroom = classrooms.find(c => c.id === classroomId);
     if (!selectedClassroom) return res.status(400).json({ error: 'Classroom not found' });
 
     const sessionId = generateId();
     const bleServiceUUID = '0000' + generateId().substring(0, 4) + '-0000-1000-8000-00805f9b34fb'; // Mock UUID
+
+    // Use Teacher's real location if provided, else fall back to hardcoded classroom
+    const sessionLat = lat || selectedClassroom.latitude;
+    const sessionLon = lon || selectedClassroom.longitude;
 
     const newSession = {
         id: sessionId,
@@ -88,14 +93,14 @@ app.post('/session/create', (req, res) => {
         isActive: true,
         bleServiceUUID,
         currentQrCode: generateId(),
-        classroomLocation: { lat: selectedClassroom.latitude, lon: selectedClassroom.longitude, radius: selectedClassroom.radiusMeters },
+        classroomLocation: { lat: sessionLat, lon: sessionLon, radius: selectedClassroom.radiusMeters },
         createdAt: Date.now()
     };
 
     sessions[sessionId] = newSession;
     attendanceRecords[sessionId] = [];
 
-    console.log(`Session created: ${sessionId} for ${subject}`);
+    console.log(`Session created: ${sessionId} for ${subject} at ${sessionLat}, ${sessionLon}`);
     res.json({ success: true, session: newSession });
 });
 
