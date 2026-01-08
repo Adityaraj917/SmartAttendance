@@ -6,9 +6,12 @@
     },
     {
       "path": "./tsconfig.node.json"
-    },
-    {
-      "path": "./student-mobile"
     }
+  ],
+  "exclude": [
+    "../student-mobile",
+    "../server",
+    "node_modules",
+    "dist"
   ]
 }
