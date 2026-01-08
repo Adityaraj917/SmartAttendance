@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { db } from '../lib/firebase';
 import { collection, addDoc, updateDoc, doc, onSnapshot, query, where, getDocs, serverTimestamp } from 'firebase/firestore';
 import { QRCodeCanvas } from 'qrcode.react';
-import { Users, MapPin, LogOut, Clock, Sparkles } from 'lucide-react';
+import { Users, MapPin, LogOut, Clock, Sparkles, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { getCurrentLocation, getDistanceInMeters } from '../lib/geo'; // Import shared utility
@@ -46,6 +46,27 @@ export default function TeacherDashboard() {
     const [subject, setSubject] = useState('');
     const [loading, setLoading] = useState(false);
     const [useMyLocation, setUseMyLocation] = useState(true);
+    const [teacherLocation, setTeacherLocation] = useState<{ lat: number, lon: number, accuracy?: number } | null>(null);
+    const [loadingLocation, setLoadingLocation] = useState(false);
+
+    const refreshLocation = async () => {
+        setLoadingLocation(true);
+        try {
+            const pos = await getCurrentLocation();
+            setTeacherLocation(pos);
+        } catch (e: any) {
+            console.error("Failed to get location", e);
+            alert("Could not get location: " + e.message);
+            setTeacherLocation(null);
+        } finally {
+            setLoadingLocation(false);
+        }
+    };
+
+    // Initial Location Fetch
+    useEffect(() => {
+        if (useMyLocation) refreshLocation();
+    }, [useMyLocation]);
 
     // Fetch Classrooms on Mount
     useEffect(() => {
@@ -209,27 +230,50 @@ export default function TeacherDashboard() {
                                     </select>
                                 </div>
                             </div>
-                            <div style={{ marginBottom: '1.5rem' }}>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                            <div style={{ marginBottom: '1.5rem', padding: '1rem', background: 'rgba(255,255,255,0.05)', borderRadius: '12px' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', marginBottom: '8px' }}>
                                     <input
                                         type="checkbox"
                                         checked={useMyLocation}
                                         onChange={e => setUseMyLocation(e.target.checked)}
                                         style={{ width: '20px', height: '20px' }}
                                     />
-                                    <span style={{ fontSize: '0.95rem', color: '#f8fafc' }}>Use my current location as class center</span>
+                                    <span style={{ fontSize: '0.95rem', color: '#f8fafc' }}>Use my current location</span>
                                 </label>
-                                <p style={{ margin: '5px 0 0 32px', fontSize: '0.8rem', color: '#94a3b8' }}>
-                                    (Ensures proximity detection works for where you actually are)
-                                </p>
+
+                                {useMyLocation && (
+                                    <div style={{ marginLeft: '32px', fontSize: '0.85rem', color: '#94a3b8' }}>
+                                        {loadingLocation ? (
+                                            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Loader2 className="animate-spin" size={12} /> Acquiring GPS...</span>
+                                        ) : teacherLocation ? (
+                                            <div>
+                                                <div style={{ color: '#34d399', fontWeight: 600 }}>
+                                                    ✓ GPS Locked (±{Math.round(teacherLocation.accuracy || 0)}m)
+                                                </div>
+                                                <div style={{ fontFamily: 'monospace', opacity: 0.8 }}>
+                                                    {teacherLocation.lat.toFixed(6)}, {teacherLocation.lon.toFixed(6)}
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <span style={{ color: '#f87171' }}>⚠ Location not available</span>
+                                        )}
+                                        <button
+                                            type="button"
+                                            onClick={refreshLocation}
+                                            style={{ marginTop: '8px', background: 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '0.75rem', cursor: 'pointer' }}
+                                        >
+                                            Retry GPS
+                                        </button>
+                                    </div>
+                                )}
                             </div>
 
                             <div style={{ marginBottom: '2.5rem' }}>
                                 <label style={{ display: 'block', marginBottom: '10px', color: '#94a3b8', fontSize: '0.9rem', fontWeight: 500 }}>Subject Name</label>
                                 <input type="text" style={{ fontSize: '1.1rem', fontWeight: 600 }} placeholder="e.g. Advanced AI Systems" value={subject} onChange={e => setSubject(e.target.value)} required />
                             </div>
-                            <button type="submit" className="btn-primary" style={{ width: '100%', height: '56px', fontSize: '1.1rem' }} disabled={loading}>
-                                {loading ? 'Acquiring GPS...' : 'Launch Session'}
+                            <button type="submit" className="btn-primary" style={{ width: '100%', height: '56px', fontSize: '1.1rem' }} disabled={loading || (useMyLocation && !teacherLocation)}>
+                                {loading ? 'Creating Session...' : 'Launch Session'}
                             </button>
                         </form>
                     </motion.div>
