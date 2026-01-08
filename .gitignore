@@ -23,3 +23,8 @@ dist-ssr
 *.sln
 *.sw?
 .env
+# Expo
+student-mobile/node_modules
+student-mobile/.expo
+student-mobile/android/build
+student-mobile/ios

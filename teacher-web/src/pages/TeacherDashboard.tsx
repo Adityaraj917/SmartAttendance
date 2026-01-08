@@ -23,6 +23,7 @@ interface Session {
     classroomId: string;
     classroomName: string;
     isActive: boolean;
+    bleServiceUUID?: string;
     classroomLocation: { lat: number, lon: number, radius: number };
 }
 
@@ -85,6 +86,28 @@ export default function TeacherDashboard() {
         fetchClassrooms();
     }, []);
 
+    // Restore Active Session
+    useEffect(() => {
+        const checkActiveSession = async () => {
+            if (!user?.id) return;
+            try {
+                const q = query(
+                    collection(db, "sessions"),
+                    where("teacherId", "==", user.id),
+                    where("isActive", "==", true)
+                );
+                const snapshot = await getDocs(q);
+                if (!snapshot.empty) {
+                    const docData = snapshot.docs[0];
+                    setSession({ id: docData.id, ...docData.data() } as Session);
+                }
+            } catch (e) {
+                console.error("Error restoring session:", e);
+            }
+        };
+        checkActiveSession();
+    }, [user?.id]);
+
     // Real-time Attendance Listener
     useEffect(() => {
         if (!session?.id) return;
@@ -144,6 +167,7 @@ export default function TeacherDashboard() {
                 subject,
                 isActive: true,
                 currentQrCode: Math.random().toString(36).substring(2, 10),
+                bleServiceUUID: '0000' + Math.random().toString(16).slice(2, 6) + '-0000-1000-8000-00805f9b34fb', // Standard BLE Format (Mocked prefix)
                 classroomLocation: { lat, lon, radius: selectedClassroom.radiusMeters },
                 createdAt: serverTimestamp()
             };
@@ -315,6 +339,9 @@ export default function TeacherDashboard() {
                                 </div>
                                 <div style={{ display: 'inline-block', padding: '8px 16px', borderRadius: '12px', background: 'rgba(255,255,255,0.05)', fontSize: '0.9rem', color: '#94a3b8' }}>
                                     Session ID: <span style={{ color: 'white', fontFamily: 'monospace' }}>{session.id}</span>
+                                </div>
+                                <div style={{ marginTop: '8px', padding: '8px 16px', borderRadius: '12px', background: 'rgba(255,255,255,0.05)', fontSize: '0.9rem', color: '#94a3b8' }}>
+                                    BLE UUID: <span style={{ color: '#fbbf24', fontFamily: 'monospace', fontSize: '0.8rem' }}>{session.bleServiceUUID || 'N/A'}</span>
                                 </div>
                             </div>
 
