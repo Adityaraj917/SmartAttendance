@@ -1,18 +1,20 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { db } from '../lib/firebase'; // Ensure this matches your project structure
+import { db } from '../lib/firebase';
 import { collection, query, where, onSnapshot, addDoc, serverTimestamp, doc, updateDoc, getDocs } from 'firebase/firestore';
 import { Html5QrcodeScanner } from 'html5-qrcode';
 import { MapPin, CheckCircle, LogOut, ScanLine, Wifi, Zap, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
+import { getDistanceInMeters } from '../lib/geo'; // Import shared utility
 
 interface Session {
     id: string;
     subject: string;
     classroomName: string;
     classroomLocation: { lat: number; lon: number; radius: number };
-    currentQrCode: string; // Needed for client verification
+    currentQrCode: string;
+    isActive: boolean;
 }
 
 export default function StudentDashboard() {
@@ -21,16 +23,16 @@ export default function StudentDashboard() {
     const [sessions, setSessions] = useState<Session[]>([]);
     const [scanning, setScanning] = useState(false);
     const [selectedSession, setSelectedSession] = useState<Session | null>(null);
-    const [attendanceStatus, setAttendanceStatus] = useState<'NONE' | 'MARKED' | 'FAILED'>('NONE');
+    const [attendanceStatus, setAttendanceStatus] = useState<'NONE' | 'JOINING' | 'MARKED' | 'FAILED'>('NONE');
     const [msg, setMsg] = useState('');
-    const [location, setLocation] = useState<{ lat: number, lon: number } | null>(null);
+    const [location, setLocation] = useState<{ lat: number, lon: number; accuracy?: number } | null>(null);
     const [distance, setDistance] = useState<number | null>(null);
-
-    // Track the attendance Doc ID for heartbeats
+    const [autoJoinEnabled, setAutoJoinEnabled] = useState(true);
 
     const heartbeatInterval = useRef<number | null>(null);
+    const joinedSessionIdRef = useRef<string | null>(null); // To prevent double joining
 
-    // Real-time Session Listener
+    // 1. Real-time Session Listener
     useEffect(() => {
         const q = query(collection(db, "sessions"), where("isActive", "==", true));
         const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -43,43 +45,67 @@ export default function StudentDashboard() {
         return () => unsubscribe();
     }, []);
 
-    // Geolocation Tracker
+    // 2. Geolocation Tracker & Auto-Join Logic
     useEffect(() => {
-        if (navigator.geolocation) {
-            const watchId = navigator.geolocation.watchPosition(
-                (pos) => {
-                    const newLoc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-                    setLocation(newLoc);
-                    // Update distance if session selected
-                    if (selectedSession) {
-                        const d = getDistance(newLoc.lat, newLoc.lon, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon);
-                        setDistance(d);
-                    }
-                },
-                (err) => console.error(err),
-                { enableHighAccuracy: true, maximumAge: 10000 }
-            );
-            return () => navigator.geolocation.clearWatch(watchId);
+        if (!navigator.geolocation) {
+            setMsg("Geolocation not supported");
+            return;
         }
-    }, [selectedSession]);
 
-    const getDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-        const R = 6371e3;
-        const φ1 = lat1 * Math.PI / 180, φ2 = lat2 * Math.PI / 180;
-        const Δφ = (lat2 - lat1) * Math.PI / 180, Δλ = (lon2 - lon1) * Math.PI / 180;
-        const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    };
+        const watchId = navigator.geolocation.watchPosition(
+            async (pos) => {
+                const newLoc = {
+                    lat: pos.coords.latitude,
+                    lon: pos.coords.longitude,
+                    accuracy: pos.coords.accuracy
+                };
+                setLocation(newLoc);
+
+                // Check distance for selected session (visual feedback)
+                if (selectedSession) {
+                    const d = getDistanceInMeters(newLoc.lat, newLoc.lon, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon);
+                    setDistance(d);
+                }
+
+                // AUTO-JOIN LOGIC
+                if (autoJoinEnabled && attendanceStatus === 'NONE' && !joinedSessionIdRef.current) {
+                    for (const s of sessions) {
+                        const d = getDistanceInMeters(newLoc.lat, newLoc.lon, s.classroomLocation.lat, s.classroomLocation.lon);
+                        // Join if distance <= radius (with slight buffer for GPS jitter, e.g. +10m)
+                        if (d <= s.classroomLocation.radius + 10) {
+                            console.log(`Auto-joining session: ${s.subject} (Dist: ${Math.round(d)}m)`);
+                            setSelectedSession(s);
+                            setDistance(d);
+                            await markAttendance(s, undefined, d); // No QR needed
+                            break; // Join the first one found
+                        }
+                    }
+                }
+            },
+            (err) => {
+                console.error("GPS Error:", err);
+                if (err.code === 1) setMsg("Location Permission Denied");
+                else if (err.code === 3) setMsg("GPS Timeout - Retrying...");
+            },
+            { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
+        );
+
+        return () => navigator.geolocation.clearWatch(watchId);
+    }, [sessions, selectedSession, autoJoinEnabled, attendanceStatus]); // Re-run if sessions list changes
 
     const handleSelectSession = (s: Session) => {
-        if (!location) { alert("Enable location!"); return; }
-        const d = getDistance(location.lat, location.lon, s.classroomLocation.lat, s.classroomLocation.lon);
+        if (!location) { alert("Waiting for location..."); return; }
+        const d = getDistanceInMeters(location.lat, location.lon, s.classroomLocation.lat, s.classroomLocation.lon);
         setDistance(d);
         setSelectedSession(s);
 
-        if (d <= s.classroomLocation.radius + 100) setMsg(`In Range (${Math.round(d)}m)`); // +100m buffer for GPS drift/indoors
+        if (d <= s.classroomLocation.radius + 20) setMsg(`In Range (${Math.round(d)}m)`);
         else setMsg(`Too Far (${Math.round(d)}m)`);
-        setAttendanceStatus('NONE'); // Reset status when switching
+
+        // Don't reset status if we are already marked for THIS session
+        if (joinedSessionIdRef.current !== s.id) {
+            setAttendanceStatus('NONE');
+        }
     };
 
     const startScanner = () => { if (selectedSession) { setScanning(true); setMsg(''); } };
@@ -91,66 +117,73 @@ export default function StudentDashboard() {
             scanner.render(async (txt) => {
                 scanner.clear();
                 setScanning(false);
-                await markAttendance(txt);
-            }, (err) => { console.log(err); }); // Error logic
+                if (location) {
+                    const d = getDistanceInMeters(location.lat, location.lon, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon);
+                    await markAttendance(selectedSession, txt, d);
+                }
+            }, (err) => { console.log(err); });
             return () => { try { scanner.clear(); } catch (e) { } };
         }
-    }, [scanning, selectedSession]);
+    }, [scanning, selectedSession, location]);
 
-    const markAttendance = async (qrCode: string) => {
-        if (!selectedSession || !location || !user) return;
+    const markAttendance = async (session: Session, qrCode?: string, currentDistance?: number) => {
+        if (!user) return;
+        setAttendanceStatus('JOINING');
+        setMsg("Verifying...");
 
-        // 1. Validate QR
-        if (qrCode !== selectedSession.currentQrCode) {
+        // 1. Validate QR (If provided)
+        if (qrCode && qrCode !== session.currentQrCode) {
             setAttendanceStatus('FAILED');
             setMsg("Invalid QR Code");
             return;
         }
 
-        // 2. Validate Geo (Double check at moment of marking)
-        const d = getDistance(location.lat, location.lon, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon);
-        // Allow user override for demo if "teleport" was used (distance would be ~0)
-        // But enforce limit:
-        if (d > selectedSession.classroomLocation.radius + 100) {
+        // 2. Validate Geo (Strict)
+        const dist = currentDistance ?? 99999;
+        const maxDist = session.classroomLocation.radius + 50; // 50m buffer for error
+
+        if (dist > maxDist) {
             setAttendanceStatus('FAILED');
-            setMsg(`Location Verification Failed. Distance: ${Math.round(d)}m`);
+            setMsg(`Too far to join! (${Math.round(dist)}m)`);
             return;
         }
 
         try {
-            // 3. Check for duplicates
+            // 3. Check/Create Record
             const q = query(
                 collection(db, "attendance"),
-                where("sessionId", "==", selectedSession.id),
+                where("sessionId", "==", session.id),
                 where("studentId", "==", user.id)
             );
             const querySnapshot = await getDocs(q);
 
             if (!querySnapshot.empty) {
                 setAttendanceStatus('MARKED');
-                setMsg("Already Marked Present");
-
+                setMsg("Welcome Back!");
+                joinedSessionIdRef.current = session.id;
                 startHeartbeat(querySnapshot.docs[0].id);
                 return;
             }
 
-            // 4. Write Record
+            // 4. Create New Record
             const docRef = await addDoc(collection(db, "attendance"), {
-                sessionId: selectedSession.id,
+                sessionId: session.id,
                 studentId: user.id,
                 studentName: user.name,
-                status: 'PRESENT',
+                status: qrCode ? 'PRESENT (QR)' : 'PRESENT (AUTO-GPS)',
                 timestamp: serverTimestamp(),
-                heartbeatLastSeen: serverTimestamp()
+                heartbeatLastSeen: serverTimestamp(),
+                device: navigator.userAgent,
+                location: location ? { lat: location.lat, lon: location.lon, accuracy: location.accuracy } : null
             });
 
             setAttendanceStatus('MARKED');
-
+            joinedSessionIdRef.current = session.id;
             startHeartbeat(docRef.id);
 
         } catch (e: any) {
             setAttendanceStatus('FAILED');
-            setMsg(e.message);
+            setMsg("Error: " + e.message);
             console.error(e);
         }
     };
@@ -161,30 +194,35 @@ export default function StudentDashboard() {
         // Initial heartbeat
         updateHeartbeat(docId);
 
+        // Send heartbeat every 10 minutes (600,000 ms)
         heartbeatInterval.current = window.setInterval(() => {
             updateHeartbeat(docId);
-        }, 30000); // 30 seconds heartbeat
+        }, 10 * 60 * 1000);
     };
 
     const updateHeartbeat = async (docId: string) => {
         try {
-            await updateDoc(doc(db, "attendance", docId), {
+            const updates: any = {
                 heartbeatLastSeen: serverTimestamp()
-            });
-            console.log("Heartbeat sent");
+            };
+
+            // If we have a fresh location, update it
+            if (location) {
+                updates.location = {
+                    lat: location.lat,
+                    lon: location.lon,
+                    accuracy: location.accuracy
+                };
+            }
+
+            await updateDoc(doc(db, "attendance", docId), updates);
+            console.log("Heartbeat sent at", new Date().toISOString());
         } catch (e) {
             console.error("Heartbeat failed", e);
         }
     };
 
     useEffect(() => () => { if (heartbeatInterval.current) clearInterval(heartbeatInterval.current); }, []);
-
-    const teleportToClass = () => {
-        if (selectedSession) {
-            setLocation({ lat: selectedSession.classroomLocation.lat, lon: selectedSession.classroomLocation.lon });
-            setDistance(0); setMsg("Debug: Teleported to class");
-        }
-    };
 
     return (
         <div className="dashboard-container">
@@ -195,7 +233,19 @@ export default function StudentDashboard() {
                     </div>
                     <div>
                         <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 700 }}>Student Portal</h1>
-                        <p style={{ color: '#94a3b8', margin: 0 }}>ID: {user?.id} <span style={{ opacity: 0.5 }}>|</span> {location ? 'GPS Ready' : 'Locating...'}</p>
+                        <p style={{ color: '#94a3b8', margin: 0 }}>
+                            {user?.name}
+                            <span style={{ margin: '0 8px', opacity: 0.3 }}>|</span>
+                            {location ? (
+                                <span style={{ color: '#34d399', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                    GPS Active <span style={{ fontSize: '0.7em', padding: '2px 4px', background: 'rgba(52, 211, 153, 0.1)', borderRadius: '4px' }}>±{Math.round(location.accuracy || 0)}m</span>
+                                </span>
+                            ) : (
+                                <span style={{ color: '#fbbf24', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                    <Loader2 size={12} className="animate-spin" /> Locating...
+                                </span>
+                            )}
+                        </p>
                     </div>
                 </div>
                 <button className="btn-secondary" onClick={() => { logout(); navigate('/login'); }}>
@@ -204,136 +254,130 @@ export default function StudentDashboard() {
             </header>
 
             {attendanceStatus === 'MARKED' ? (
-                <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="glass-panel" style={{ padding: '4rem', textAlign: 'center', maxWidth: '500px', margin: '4rem auto' }}>
+                <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="glass-panel" style={{ padding: '3rem', textAlign: 'center', maxWidth: '500px', margin: '2rem auto' }}>
                     <motion.div
                         initial={{ scale: 0 }} animate={{ scale: 1 }}
                         style={{ width: '100px', height: '100px', borderRadius: '50%', background: 'rgba(16, 185, 129, 0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 2rem', color: '#34d399' }}
                     >
                         <CheckCircle size={64} />
                     </motion.div>
-                    <h2 style={{ fontSize: '2rem', marginBottom: '1rem' }}>Success!</h2>
-                    <p style={{ fontSize: '1.1rem', color: '#94a3b8' }}>Checked in to <strong>{selectedSession?.subject}</strong>.</p>
+                    <h2 style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>Checked In!</h2>
+                    <p style={{ fontSize: '1.2rem', color: '#f8fafc', marginBottom: '2rem' }}>
+                        You are present in <strong>{selectedSession?.subject}</strong>
+                    </p>
 
-                    <div style={{ marginTop: '3rem', padding: '1rem', background: 'rgba(59, 130, 246, 0.1)', borderRadius: '12px', display: 'flex', alignItems: 'center', gap: '12px', justifyContent: 'center' }}>
-                        <div style={{ width: '10px', height: '10px', background: '#3b82f6', borderRadius: '50%' }} className="animate-pulse" />
-                        <span style={{ color: '#60a5fa', fontSize: '0.9rem', fontWeight: 600 }}>Live Connection Active</span>
+                    <div style={{ padding: '1rem', background: 'rgba(255,255,255,0.03)', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
+                        <div className="status-badge status-active">
+                            <Wifi size={14} /> Connected
+                        </div>
                     </div>
                 </motion.div>
             ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '2rem' }}>
-                    {/* Radar Section */}
-                    <section>
-                        <h3 style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '1.5rem' }}>
-                            <Wifi className="text-accent animate-pulse" /> Detected Beacons
-                        </h3>
+                <div style={{ maxWidth: '600px', margin: '0 auto', display: 'grid', gap: '2rem' }}>
 
-                        <div style={{ display: 'grid', gap: '1rem' }}>
-                            {sessions.length === 0 && (
-                                <div className="glass-panel" style={{ padding: '3rem', textAlign: 'center', color: '#64748b' }}>
-                                    <Loader2 size={32} className="animate-spin" style={{ marginBottom: '1rem', opacity: 0.5 }} />
-                                    <p>Scanning for nearby classes...</p>
-                                </div>
-                            )}
-                            {sessions.map(s => (
+                    {/* Auto-Join Status Strip */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 20px', background: 'rgba(255,255,255,0.03)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <div style={{ position: 'relative' }}>
+                                <Wifi size={20} className={autoJoinEnabled ? "text-accent" : "text-muted"} />
+                                {autoJoinEnabled && <span style={{ position: 'absolute', top: -2, right: -2, width: 6, height: 6, background: '#34d399', borderRadius: '50%' }} className="animate-pulse" />}
+                            </div>
+                            <span style={{ fontSize: '0.9rem', fontWeight: 500 }}>Auto-Join Nearby Classes</span>
+                        </div>
+                        <label className="switch">
+                            <input type="checkbox" checked={autoJoinEnabled} onChange={e => setAutoJoinEnabled(e.target.checked)} />
+                            <span className="slider round"></span>
+                        </label>
+                    </div>
+
+                    {/* Active Sessions List */}
+                    <div style={{ display: 'grid', gap: '1rem' }}>
+                        <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#94a3b8', paddingLeft: '4px' }}>Available Sessions</h3>
+
+                        {sessions.length === 0 && (
+                            <div className="glass-panel" style={{ padding: '3rem', textAlign: 'center', color: '#64748b' }}>
+                                <Loader2 size={32} className="animate-spin" style={{ marginBottom: '1rem', opacity: 0.5 }} />
+                                <p>Searching for active classes...</p>
+                            </div>
+                        )}
+
+                        {sessions.map(s => {
+                            const dist = location ? getDistanceInMeters(location.lat, location.lon, s.classroomLocation.lat, s.classroomLocation.lon) : null;
+                            const isClose = dist !== null && dist <= s.classroomLocation.radius + 20;
+
+                            return (
                                 <motion.div
                                     key={s.id}
                                     className="glass-panel"
-                                    whileHover={{ scale: 1.02, backgroundColor: 'rgba(99, 102, 241, 0.1)' }}
+                                    whileHover={{ scale: 1.01 }}
                                     onClick={() => handleSelectSession(s)}
                                     style={{
                                         cursor: 'pointer',
                                         padding: '1.5rem',
                                         border: selectedSession?.id === s.id ? '2px solid var(--accent-color)' : '1px solid var(--glass-border)',
-                                        position: 'relative',
-                                        overflow: 'hidden'
+                                        background: isClose ? 'linear-gradient(145deg, rgba(16, 185, 129, 0.05), rgba(0,0,0,0.2))' : undefined,
+                                        position: 'relative'
                                     }}
                                 >
-                                    {selectedSession?.id === s.id && <div style={{ position: 'absolute', top: 0, left: 0, bottom: 0, width: '4px', background: 'var(--accent-color)' }} />}
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
                                         <div>
-                                            <h4 style={{ margin: '0 0 5px 0', fontSize: '1.1rem' }}>{s.subject}</h4>
+                                            <h4 style={{ margin: '0 0 6px 0', fontSize: '1.2rem' }}>{s.subject}</h4>
                                             <p style={{ margin: 0, color: '#94a3b8', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
                                                 <MapPin size={14} /> {s.classroomName}
                                             </p>
                                         </div>
-                                        <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#34d399', boxShadow: '0 0 10px #34d399' }} />
+                                        {dist !== null && (
+                                            <div style={{ textAlign: 'right' }}>
+                                                <span style={{ fontSize: '1.2rem', fontWeight: 700, color: isClose ? '#34d399' : '#f87171' }}>
+                                                    {Math.round(dist)}m
+                                                </span>
+                                                <br />
+                                                <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Dist</span>
+                                            </div>
+                                        )}
                                     </div>
-                                </motion.div>
-                            ))}
-                        </div>
-                    </section>
 
-                    {/* Interaction Panel */}
-                    <AnimatePresence>
-                        {selectedSession && (
-                            <motion.div
-                                initial={{ x: 20, opacity: 0 }}
-                                animate={{ x: 0, opacity: 1 }}
-                                className="glass-panel"
-                                style={{ padding: '2rem', height: 'fit-content' }}
-                            >
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <h3 style={{ marginTop: 0, fontSize: '1.5rem', marginBottom: 0 }}>Entry Authorization</h3>
-                                    <button onClick={() => {
-                                        navigator.geolocation.getCurrentPosition(
-                                            (pos) => {
-                                                const newLoc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-                                                setLocation(newLoc);
-                                                if (selectedSession) {
-                                                    const d = getDistance(newLoc.lat, newLoc.lon, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon);
-                                                    setDistance(d);
-                                                }
-                                                alert("GPS Signal Refreshed!");
-                                            },
-                                            (err) => alert("GPS Error: " + err.message),
-                                            { enableHighAccuracy: true }
-                                        );
-                                    }} style={{ background: 'transparent', border: '1px solid var(--accent-color)', color: 'var(--accent-color)', borderRadius: '8px', padding: '4px 8px', cursor: 'pointer', fontSize: '0.8rem' }}>
-                                        Refresh GPS
-                                    </button>
-                                </div>
-                                <p style={{ color: '#94a3b8', marginBottom: '2rem' }}>Verify your location to proceed.</p>
-
-                                <div style={{ marginBottom: '2rem', padding: '1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '0.9rem', color: '#94a3b8' }}>
-                                        <span>Target Distance</span>
-                                        <span>{distance ? Math.round(distance) : '...'}m / {selectedSession.classroomLocation.radius}m</span>
-                                    </div>
-                                    {/* Proximity Bar */}
-                                    <div style={{ height: '6px', background: 'rgba(255,255,255,0.1)', borderRadius: '3px', overflow: 'hidden' }}>
-                                        <motion.div
-                                            initial={{ width: 0 }}
-                                            animate={{ width: distance ? `${Math.min(100, (selectedSession.classroomLocation.radius / distance) * 100)}%` : '0%' }}
-                                            style={{ height: '100%', background: distance && distance <= selectedSession.classroomLocation.radius + 100 ? '#34d399' : '#f87171' }}
-                                        />
-                                    </div>
-                                    {distance && distance > selectedSession.classroomLocation.radius && (
-                                        <button onClick={teleportToClass} style={{ marginTop: '10px', fontSize: '0.8rem', color: '#60a5fa', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>
-                                            Developer Override: Teleport
-                                        </button>
+                                    {isClose && (
+                                        <div style={{ marginTop: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: '#34d399', background: 'rgba(52, 211, 153, 0.1)', padding: '4px 8px', borderRadius: '6px' }}>
+                                            <CheckCircle size={12} /> Within Range
+                                        </div>
                                     )}
+                                </motion.div>
+                            );
+                        })}
+                    </div>
+
+                    {/* Manual Entry (Fallback) */}
+                    <AnimatePresence>
+                        {selectedSession && !attendanceStatus.includes('MARKED') && (
+                            <motion.div
+                                initial={{ y: 20, opacity: 0 }}
+                                animate={{ y: 0, opacity: 1 }}
+                                className="glass-panel"
+                                style={{ padding: '2rem' }}
+                            >
+                                <h3 style={{ marginTop: 0 }}>Manual Check-in</h3>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+                                    <p style={{ color: '#94a3b8', margin: 0 }}>Auto-join didn't work? Try scanning the QR code.</p>
+                                    <span style={{ fontSize: '0.9rem', fontWeight: 600, color: distance && distance <= selectedSession.classroomLocation.radius + 20 ? '#34d399' : '#f87171', background: 'rgba(255,255,255,0.05)', padding: '4px 8px', borderRadius: '6px' }}>
+                                        {distance ? `${Math.round(distance)}m Away` : '...'}
+                                    </span>
                                 </div>
 
                                 {msg && (
-                                    <div style={{ marginBottom: '2rem', padding: '0.8rem', borderRadius: '8px', background: msg.includes('Too') || msg.includes('Failed') ? 'rgba(239, 68, 68, 0.2)' : 'rgba(16, 185, 129, 0.2)', color: msg.includes('Too') || msg.includes('Failed') ? '#f87171' : '#34d399', fontSize: '0.9rem', fontWeight: 600, textAlign: 'center' }}>
+                                    <div style={{ marginBottom: '1.5rem', padding: '1rem', borderRadius: '8px', background: 'rgba(255,255,255,0.05)', textAlign: 'center', color: '#f8fafc' }}>
                                         {msg}
                                     </div>
                                 )}
 
                                 {!scanning ? (
-                                    <button
-                                        className="btn-primary"
-                                        onClick={startScanner}
-                                        style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px' }}
-                                    >
-                                        <ScanLine /> Initialize Scanner
+                                    <button className="btn-primary" onClick={startScanner} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+                                        <ScanLine /> Scan QR Code
                                     </button>
                                 ) : (
-                                    <div style={{ textAlign: 'center' }}>
-                                        <div style={{ overflow: 'hidden', borderRadius: '16px', border: '2px solid var(--accent-color)', marginBottom: '1rem' }}>
-                                            <div id="reader"></div>
-                                        </div>
-                                        <button className="btn-secondary" onClick={() => setScanning(false)} style={{ width: '100%' }}>Abort Sequence</button>
+                                    <div>
+                                        <div id="reader" style={{ borderRadius: '12px', overflow: 'hidden', border: '2px solid #3b82f6', marginBottom: '1rem' }}></div>
+                                        <button className="btn-secondary" onClick={() => setScanning(false)} style={{ width: '100%' }}>Cancel Scan</button>
                                     </div>
                                 )}
                             </motion.div>

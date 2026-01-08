@@ -6,6 +6,7 @@ import { QRCodeCanvas } from 'qrcode.react';
 import { Users, MapPin, LogOut, Clock, Sparkles } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
+import { getCurrentLocation, getDistanceInMeters } from '../lib/geo'; // Import shared utility
 
 interface Classroom {
     id: string;
@@ -22,6 +23,7 @@ interface Session {
     classroomId: string;
     classroomName: string;
     isActive: boolean;
+    classroomLocation: { lat: number, lon: number, radius: number };
 }
 
 interface AttendanceRecord {
@@ -30,6 +32,8 @@ interface AttendanceRecord {
     studentName: string;
     timestamp: any; // Firestore timestamp
     status: string;
+    heartbeatLastSeen?: any;
+    location?: { lat: number, lon: number, accuracy: number };
 }
 
 export default function TeacherDashboard() {
@@ -55,10 +59,6 @@ export default function TeacherDashboard() {
                 setClassrooms(list);
             } catch (e) {
                 console.error("Error fetching classrooms:", e);
-                // Fallback for dev if DB empty
-                if (import.meta.env.DEV) {
-                    // setClassrooms([{id: 'c1', name: 'Mock Classroom', latitude: 0, longitude: 0, radiusMeters: 50}]);
-                }
             }
         };
         fetchClassrooms();
@@ -70,8 +70,7 @@ export default function TeacherDashboard() {
 
         const q = query(
             collection(db, "attendance"),
-            where("sessionId", "==", session.id),
-            // orderBy("timestamp", "desc") // requires index, can sort client side for prototype
+            where("sessionId", "==", session.id)
         );
 
         const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -103,14 +102,15 @@ export default function TeacherDashboard() {
 
         if (useMyLocation) {
             try {
-                const pos: any = await new Promise((resolve, reject) => {
-                    navigator.geolocation.getCurrentPosition(resolve, reject);
-                });
-                lat = pos.coords.latitude;
-                lon = pos.coords.longitude;
-            } catch (err) {
-                console.error("Location access denied, falling back to classroom default");
-                alert("Could not get your location. Using default classroom coordinates.");
+                const pos = await getCurrentLocation(); // Use robust utility
+                lat = pos.lat;
+                lon = pos.lon;
+            } catch (err: any) {
+                console.error("Location access denied/failed:", err);
+                alert(`Location Error: ${err.message}. Using default classroom coordinates.`);
+                // Fallback to defaults
+                lat = selectedClassroom.latitude;
+                lon = selectedClassroom.longitude;
             }
         }
 
@@ -132,7 +132,7 @@ export default function TeacherDashboard() {
             setSession({
                 id: docRef.id,
                 ...newSessionPayload
-            } as any); // Cast because serverTimestamp is not immediate
+            } as any);
 
         } catch (e) {
             console.error(e);
@@ -205,7 +205,7 @@ export default function TeacherDashboard() {
                                         required
                                     >
                                         <option value="">-- Choose Location --</option>
-                                        {classrooms.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                        {classrooms.map(c => <option key={c.id} value={c.id}>{c.name} ({c.radiusMeters}m)</option>)}
                                     </select>
                                 </div>
                             </div>
@@ -220,7 +220,7 @@ export default function TeacherDashboard() {
                                     <span style={{ fontSize: '0.95rem', color: '#f8fafc' }}>Use my current location as class center</span>
                                 </label>
                                 <p style={{ margin: '5px 0 0 32px', fontSize: '0.8rem', color: '#94a3b8' }}>
-                                    (Overrides the classroom default coordinates)
+                                    (Ensures proximity detection works for where you actually are)
                                 </p>
                             </div>
 
@@ -229,7 +229,7 @@ export default function TeacherDashboard() {
                                 <input type="text" style={{ fontSize: '1.1rem', fontWeight: 600 }} placeholder="e.g. Advanced AI Systems" value={subject} onChange={e => setSubject(e.target.value)} required />
                             </div>
                             <button type="submit" className="btn-primary" style={{ width: '100%', height: '56px', fontSize: '1.1rem' }} disabled={loading}>
-                                {loading ? 'Initializing...' : 'Launch Session'}
+                                {loading ? 'Acquiring GPS...' : 'Launch Session'}
                             </button>
                         </form>
                     </motion.div>
@@ -305,30 +305,43 @@ export default function TeacherDashboard() {
                                     </div>
                                 ) : (
                                     <div style={{ display: 'grid', gap: '12px' }}>
-                                        {attendance.map((record, i) => (
-                                            <motion.div
-                                                key={i}
-                                                initial={{ opacity: 0, y: 10 }}
-                                                animate={{ opacity: 1, y: 0 }}
-                                                transition={{ delay: i * 0.05 }}
-                                                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.03)' }}
-                                            >
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                                    <div style={{ width: '36px', height: '36px', borderRadius: '50%', background: 'linear-gradient(135deg, #10b981, #059669)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontWeight: 'bold', fontSize: '0.9rem' }}>
-                                                        {record.studentName.charAt(0)}
+                                        {attendance.map((record, i) => {
+                                            // Calculate distance if student has location
+                                            const dist = record.location ? getDistanceInMeters(
+                                                record.location.lat, record.location.lon,
+                                                session.classroomLocation.lat, session.classroomLocation.lon
+                                            ) : null;
+
+                                            // Check Last Seen (Heartbeat) - if > 15 mins (900s), maybe inactive
+                                            const now = new Date();
+                                            const lastSeen = record.heartbeatLastSeen?.seconds ? new Date(record.heartbeatLastSeen.seconds * 1000) : null;
+                                            const isOnline = lastSeen ? (now.getTime() - lastSeen.getTime()) < 15 * 60 * 1000 : true;
+
+                                            return (
+                                                <motion.div
+                                                    key={i}
+                                                    initial={{ opacity: 0, y: 10 }}
+                                                    animate={{ opacity: 1, y: 0 }}
+                                                    transition={{ delay: i * 0.05 }}
+                                                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.03)' }}
+                                                >
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                                        <div style={{ width: '36px', height: '36px', borderRadius: '50%', background: isOnline ? 'linear-gradient(135deg, #10b981, #059669)' : 'linear-gradient(135deg, #94a3b8, #64748b)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontWeight: 'bold', fontSize: '0.9rem' }}>
+                                                            {record.studentName.charAt(0)}
+                                                        </div>
+                                                        <div>
+                                                            <p style={{ margin: 0, fontWeight: 500 }}>{record.studentName} <span style={{ fontSize: '0.7em', padding: '2px 4px', background: 'rgba(255,255,255,0.1)', borderRadius: '4px' }}>{isOnline ? 'LIVE' : 'AWAY'}</span></p>
+                                                            <p style={{ margin: 0, fontSize: '0.8rem', color: '#64748b' }}>
+                                                                {dist !== null ? `${Math.round(dist)}m away` : 'Locating...'} • {record.status}
+                                                            </p>
+                                                        </div>
                                                     </div>
-                                                    <div>
-                                                        <p style={{ margin: 0, fontWeight: 500 }}>{record.studentName}</p>
-                                                        <p style={{ margin: 0, fontSize: '0.8rem', color: '#64748b' }}>
-                                                            {record.timestamp?.seconds ? new Date(record.timestamp.seconds * 1000).toLocaleTimeString() : 'Just now'}
-                                                        </p>
+                                                    <div className={`status-badge ${isOnline ? 'status-active' : ''}`} style={{ opacity: isOnline ? 1 : 0.5 }}>
+                                                        {isOnline ? 'Verified' : 'Silent'}
                                                     </div>
-                                                </div>
-                                                <div className="status-badge status-active">
-                                                    Verified
-                                                </div>
-                                            </motion.div>
-                                        ))}
+                                                </motion.div>
+                                            )
+                                        })}
                                     </div>
                                 )}
                             </div>
