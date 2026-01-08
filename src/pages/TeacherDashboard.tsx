@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { apiRequest } from '../lib/api';
+import { db } from '../lib/firebase';
+import { collection, addDoc, updateDoc, doc, onSnapshot, query, where, getDocs, serverTimestamp, orderBy } from 'firebase/firestore';
 import { QRCodeCanvas } from 'qrcode.react';
 import { Users, MapPin, LogOut, Clock, Sparkles } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -9,6 +10,9 @@ import { useNavigate } from 'react-router-dom';
 interface Classroom {
     id: string;
     name: string;
+    latitude: number;
+    longitude: number;
+    radiusMeters: number;
 }
 
 interface Session {
@@ -17,12 +21,14 @@ interface Session {
     currentQrCode: string;
     classroomId: string;
     classroomName: string;
+    isActive: boolean;
 }
 
 interface AttendanceRecord {
+    id: string;
     studentId: string;
     studentName: string;
-    timestamp: number;
+    timestamp: any; // Firestore timestamp
     status: string;
 }
 
@@ -35,31 +41,66 @@ export default function TeacherDashboard() {
     const [selectedClassId, setSelectedClassId] = useState('');
     const [subject, setSubject] = useState('');
     const [loading, setLoading] = useState(false);
-
-    useEffect(() => {
-        apiRequest('/classrooms').then(setClassrooms).catch(console.error);
-    }, []);
-
     const [useMyLocation, setUseMyLocation] = useState(true);
 
+    // Fetch Classrooms on Mount
     useEffect(() => {
-        if (!session) return;
-        const interval = setInterval(async () => {
+        const fetchClassrooms = async () => {
             try {
-                const attData = await apiRequest(`/session/${session.id}/attendance`);
-                setAttendance(attData);
-                const sessData = await apiRequest(`/session/${session.id}`);
-                if (sessData) setSession(sessData);
-            } catch (e) { console.error(e); }
-        }, 3000);
-        return () => clearInterval(interval);
-    }, [session]);
+                const querySnapshot = await getDocs(collection(db, "classrooms"));
+                const list: Classroom[] = [];
+                querySnapshot.forEach((doc) => {
+                    list.push({ id: doc.id, ...doc.data() } as Classroom);
+                });
+                setClassrooms(list);
+            } catch (e) {
+                console.error("Error fetching classrooms:", e);
+                // Fallback for dev if DB empty
+                if (import.meta.env.DEV) {
+                    // setClassrooms([{id: 'c1', name: 'Mock Classroom', latitude: 0, longitude: 0, radiusMeters: 50}]);
+                }
+            }
+        };
+        fetchClassrooms();
+    }, []);
+
+    // Real-time Attendance Listener
+    useEffect(() => {
+        if (!session?.id) return;
+
+        const q = query(
+            collection(db, "attendance"),
+            where("sessionId", "==", session.id),
+            // orderBy("timestamp", "desc") // requires index, can sort client side for prototype
+        );
+
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const list: AttendanceRecord[] = [];
+            snapshot.forEach((doc) => {
+                list.push({ id: doc.id, ...doc.data() } as AttendanceRecord);
+            });
+            // Client-side sort
+            list.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+            setAttendance(list);
+        });
+
+        return () => unsubscribe();
+    }, [session?.id]);
 
     const createSession = async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
 
-        let lat, lon;
+        const selectedClassroom = classrooms.find(c => c.id === selectedClassId);
+        if (!selectedClassroom) {
+            alert("Please select a classroom");
+            setLoading(false);
+            return;
+        }
+
+        let lat = selectedClassroom.latitude;
+        let lon = selectedClassroom.longitude;
+
         if (useMyLocation) {
             try {
                 const pos: any = await new Promise((resolve, reject) => {
@@ -68,29 +109,52 @@ export default function TeacherDashboard() {
                 lat = pos.coords.latitude;
                 lon = pos.coords.longitude;
             } catch (err) {
-                console.error("Location access denied, flowing back to classroom default");
+                console.error("Location access denied, falling back to classroom default");
                 alert("Could not get your location. Using default classroom coordinates.");
             }
         }
 
         try {
-            const res = await apiRequest('/session/create', 'POST', {
+            const newSessionPayload = {
                 teacherId: user?.id,
+                teacherName: user?.name,
                 classroomId: selectedClassId,
+                classroomName: selectedClassroom.name,
                 subject,
-                lat,
-                lon
-            });
-            if (res.success) setSession(res.session);
-        } catch (e) { alert('Failed to create session'); } finally { setLoading(false); }
+                isActive: true,
+                currentQrCode: Math.random().toString(36).substring(2, 10),
+                classroomLocation: { lat, lon, radius: selectedClassroom.radiusMeters },
+                createdAt: serverTimestamp()
+            };
+
+            const docRef = await addDoc(collection(db, "sessions"), newSessionPayload);
+
+            setSession({
+                id: docRef.id,
+                ...newSessionPayload
+            } as any); // Cast because serverTimestamp is not immediate
+
+        } catch (e) {
+            console.error(e);
+            alert('Failed to create session');
+        } finally {
+            setLoading(false);
+        }
     };
 
     const endSession = async () => {
         if (!session) return;
         if (confirm('End this session?')) {
-            await apiRequest(`/session/${session.id}/end`, 'POST');
-            setSession(null);
-            setAttendance([]);
+            try {
+                await updateDoc(doc(db, "sessions", session.id), {
+                    isActive: false
+                });
+                setSession(null);
+                setAttendance([]);
+            } catch (e) {
+                console.error("Error ending session:", e);
+                alert("Failed to end session");
+            }
         }
     };
 
@@ -255,7 +319,9 @@ export default function TeacherDashboard() {
                                                     </div>
                                                     <div>
                                                         <p style={{ margin: 0, fontWeight: 500 }}>{record.studentName}</p>
-                                                        <p style={{ margin: 0, fontSize: '0.8rem', color: '#64748b' }}>{new Date(record.timestamp).toLocaleTimeString()}</p>
+                                                        <p style={{ margin: 0, fontSize: '0.8rem', color: '#64748b' }}>
+                                                            {record.timestamp?.seconds ? new Date(record.timestamp.seconds * 1000).toLocaleTimeString() : 'Just now'}
+                                                        </p>
                                                     </div>
                                                 </div>
                                                 <div className="status-badge status-active">

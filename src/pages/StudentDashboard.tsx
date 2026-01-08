@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { apiRequest } from '../lib/api';
+import { db } from '../lib/firebase'; // Ensure this matches your project structure
+import { collection, query, where, onSnapshot, addDoc, serverTimestamp, doc, updateDoc, getDocs } from 'firebase/firestore';
 import { Html5QrcodeScanner } from 'html5-qrcode';
 import { MapPin, CheckCircle, LogOut, ScanLine, Wifi, Zap, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -11,6 +12,7 @@ interface Session {
     subject: string;
     classroomName: string;
     classroomLocation: { lat: number; lon: number; radius: number };
+    currentQrCode: string; // Needed for client verification
 }
 
 export default function StudentDashboard() {
@@ -23,22 +25,43 @@ export default function StudentDashboard() {
     const [msg, setMsg] = useState('');
     const [location, setLocation] = useState<{ lat: number, lon: number } | null>(null);
     const [distance, setDistance] = useState<number | null>(null);
+
+    // Track the attendance Doc ID for heartbeats
+    const [attendanceDocId, setAttendanceDocId] = useState<string | null>(null);
     const heartbeatInterval = useRef<number | null>(null);
 
+    // Real-time Session Listener
     useEffect(() => {
-        const fetch = async () => setSessions(await apiRequest('/sessions/active').catch(() => []));
-        fetch(); setInterval(fetch, 5000);
+        const q = query(collection(db, "sessions"), where("isActive", "==", true));
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const list: Session[] = [];
+            snapshot.forEach(doc => {
+                list.push({ id: doc.id, ...doc.data() } as Session);
+            });
+            setSessions(list);
+        });
+        return () => unsubscribe();
     }, []);
 
+    // Geolocation Tracker
     useEffect(() => {
         if (navigator.geolocation) {
-            navigator.geolocation.getCurrentPosition(
-                (pos) => setLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+            const watchId = navigator.geolocation.watchPosition(
+                (pos) => {
+                    const newLoc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+                    setLocation(newLoc);
+                    // Update distance if session selected
+                    if (selectedSession) {
+                        const d = getDistance(newLoc.lat, newLoc.lon, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon);
+                        setDistance(d);
+                    }
+                },
                 (err) => console.error(err),
-                { enableHighAccuracy: true }
+                { enableHighAccuracy: true, maximumAge: 10000 }
             );
+            return () => navigator.geolocation.clearWatch(watchId);
         }
-    }, []);
+    }, [selectedSession]);
 
     const getDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
         const R = 6371e3;
@@ -54,42 +77,104 @@ export default function StudentDashboard() {
         setDistance(d);
         setSelectedSession(s);
 
-        if (d <= s.classroomLocation.radius + 50) setMsg(`In Range (${Math.round(d)}m)`);
+        if (d <= s.classroomLocation.radius + 100) setMsg(`In Range (${Math.round(d)}m)`); // +100m buffer for GPS drift/indoors
         else setMsg(`Too Far (${Math.round(d)}m)`);
+        setAttendanceStatus('NONE'); // Reset status when switching
     };
 
-    const startScanner = () => { if (selectedSession) setScanning(true); };
+    const startScanner = () => { if (selectedSession) { setScanning(true); setMsg(''); } };
 
+    // QR Logic
     useEffect(() => {
         if (scanning && selectedSession) {
             const scanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 }, false);
             scanner.render(async (txt) => {
-                scanner.clear(); setScanning(false); await markAttendance(txt);
-            }, () => { });
+                scanner.clear();
+                setScanning(false);
+                await markAttendance(txt);
+            }, (err) => { console.log(err); }); // Error logic
             return () => { try { scanner.clear(); } catch (e) { } };
         }
     }, [scanning, selectedSession]);
 
     const markAttendance = async (qrCode: string) => {
-        if (!selectedSession || !location) return;
+        if (!selectedSession || !location || !user) return;
+
+        // 1. Validate QR
+        if (qrCode !== selectedSession.currentQrCode) {
+            setAttendanceStatus('FAILED');
+            setMsg("Invalid QR Code");
+            return;
+        }
+
+        // 2. Validate Geo (Double check at moment of marking)
+        const d = getDistance(location.lat, location.lon, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon);
+        // Allow user override for demo if "teleport" was used (distance would be ~0)
+        // But enforce limit:
+        if (d > selectedSession.classroomLocation.radius + 100) {
+            setAttendanceStatus('FAILED');
+            setMsg(`Location Verification Failed. Distance: ${Math.round(d)}m`);
+            return;
+        }
+
         try {
-            const res = await apiRequest('/attendance/mark', 'POST', {
-                sessionId: selectedSession.id, studentId: user?.id, lat: location.lat, lon: location.lon, qrCode
-            });
-            if (res.success) {
+            // 3. Check for duplicates
+            const q = query(
+                collection(db, "attendance"),
+                where("sessionId", "==", selectedSession.id),
+                where("studentId", "==", user.id)
+            );
+            const querySnapshot = await getDocs(q);
+
+            if (!querySnapshot.empty) {
                 setAttendanceStatus('MARKED');
-                startHeartbeat(selectedSession.id);
-            } else {
-                setAttendanceStatus('FAILED'); setMsg(res.message);
+                setMsg("Already Marked Present");
+                setAttendanceDocId(querySnapshot.docs[0].id);
+                startHeartbeat(querySnapshot.docs[0].id);
+                return;
             }
-        } catch (e: any) { setAttendanceStatus('FAILED'); setMsg(e.message); }
+
+            // 4. Write Record
+            const docRef = await addDoc(collection(db, "attendance"), {
+                sessionId: selectedSession.id,
+                studentId: user.id,
+                studentName: user.name,
+                status: 'PRESENT',
+                timestamp: serverTimestamp(),
+                heartbeatLastSeen: serverTimestamp()
+            });
+
+            setAttendanceStatus('MARKED');
+            setAttendanceDocId(docRef.id);
+            startHeartbeat(docRef.id);
+
+        } catch (e: any) {
+            setAttendanceStatus('FAILED');
+            setMsg(e.message);
+            console.error(e);
+        }
     };
 
-    const startHeartbeat = (sessionId: string) => {
+    const startHeartbeat = (docId: string) => {
         if (heartbeatInterval.current) clearInterval(heartbeatInterval.current);
+
+        // Initial heartbeat
+        updateHeartbeat(docId);
+
         heartbeatInterval.current = window.setInterval(() => {
-            apiRequest('/attendance/heartbeat', 'POST', { sessionId, studentId: user?.id }).catch(console.error);
-        }, 10000);
+            updateHeartbeat(docId);
+        }, 30000); // 30 seconds heartbeat
+    };
+
+    const updateHeartbeat = async (docId: string) => {
+        try {
+            await updateDoc(doc(db, "attendance", docId), {
+                heartbeatLastSeen: serverTimestamp()
+            });
+            console.log("Heartbeat sent");
+        } catch (e) {
+            console.error("Heartbeat failed", e);
+        }
     };
 
     useEffect(() => () => { if (heartbeatInterval.current) clearInterval(heartbeatInterval.current); }, []);
@@ -192,12 +277,13 @@ export default function StudentDashboard() {
                                     <button onClick={() => {
                                         navigator.geolocation.getCurrentPosition(
                                             (pos) => {
-                                                setLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude });
+                                                const newLoc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+                                                setLocation(newLoc);
                                                 if (selectedSession) {
-                                                    const d = getDistance(pos.coords.latitude, pos.coords.longitude, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon);
+                                                    const d = getDistance(newLoc.lat, newLoc.lon, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon);
                                                     setDistance(d);
                                                 }
-                                                alert("Location Refreshed!");
+                                                alert("GPS Signal Refreshed!");
                                             },
                                             (err) => alert("GPS Error: " + err.message),
                                             { enableHighAccuracy: true }
@@ -218,7 +304,7 @@ export default function StudentDashboard() {
                                         <motion.div
                                             initial={{ width: 0 }}
                                             animate={{ width: distance ? `${Math.min(100, (selectedSession.classroomLocation.radius / distance) * 100)}%` : '0%' }}
-                                            style={{ height: '100%', background: distance && distance <= selectedSession.classroomLocation.radius + 50 ? '#34d399' : '#f87171' }}
+                                            style={{ height: '100%', background: distance && distance <= selectedSession.classroomLocation.radius + 100 ? '#34d399' : '#f87171' }}
                                         />
                                     </div>
                                     {distance && distance > selectedSession.classroomLocation.radius && (

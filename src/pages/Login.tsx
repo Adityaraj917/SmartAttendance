@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { apiRequest } from '../lib/api';
 import { useNavigate } from 'react-router-dom';
 import { KeyRound, Mail, Loader2, Grip, CheckCircle2 } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -10,7 +9,7 @@ export default function Login() {
     const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
-    const { login } = useAuth();
+    const { loginWithCredentials } = useAuth();
     const navigate = useNavigate();
 
     const handleLogin = async (e: React.FormEvent) => {
@@ -19,17 +18,27 @@ export default function Login() {
         setError('');
 
         try {
-            const data = await apiRequest('/auth/login', 'POST', { email, password });
-            if (data.success) {
-                login(data.user);
-                navigate(data.user.role === 'TEACHER' ? '/teacher' : '/student');
-            }
+            await loginWithCredentials(email, password);
+            // Navigation happens automatically due to ProtectedRoute in App.tsx or we can force it
+            // Actually App.tsx redirects if user is present.
+            // But let's check user role to decide where to go if needed, 
+            // though state update might be async. 
+            // We can trust App.tsx <Routes> re-render, 
+            // but explicit navigate is safer after await.
+            // We don't have user object here easily unless we return it.
+            // Let's just rely on App.tsx or reload.
+            // Actually, let's navigate to root, App.tsx handles redirect.
+            navigate('/');
         } catch (err: any) {
+            console.error(err);
             setError(err.message || 'Login failed');
         } finally {
             setLoading(false);
         }
     };
+
+    const fillTeacher = () => { setEmail('Piram@VGU'); setPassword('Piram@123'); };
+    const fillStudent = () => { setEmail('Aditya@VGU'); setPassword('Aditya@123'); };
 
     return (
         <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' }}>
@@ -55,7 +64,7 @@ export default function Login() {
                         <Grip color="white" size={32} />
                     </motion.div>
                     <h2 style={{ fontSize: '2rem', fontWeight: 700, margin: '0 0 10px 0', background: 'linear-gradient(to right, white, #94a3b8)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-                        Welcome Back
+                        Smart Attendance
                     </h2>
                     <p style={{ color: '#94a3b8', margin: 0 }}>Sign in to access your dashboard</p>
                 </div>
@@ -71,8 +80,8 @@ export default function Login() {
                     <div style={{ position: 'relative', marginBottom: '1.25rem' }}>
                         <Mail size={18} style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)', color: '#64748b', transition: 'color 0.2s' }} />
                         <input
-                            type="email"
-                            placeholder="Email address"
+                            type="text"
+                            placeholder="Email / User ID"
                             value={email}
                             onChange={(e) => setEmail(e.target.value)}
                             style={{ paddingLeft: '48px', height: '52px' }}
@@ -98,13 +107,13 @@ export default function Login() {
                 </form>
 
                 <div style={{ marginTop: '2.5rem', paddingTop: '1.5rem', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-                    <p style={{ fontSize: '0.8rem', color: '#64748b', textAlign: 'center', marginBottom: '1rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Test Accounts</p>
+                    <p style={{ fontSize: '0.8rem', color: '#64748b', textAlign: 'center', marginBottom: '1rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Quick Login (Demo)</p>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                        <div onClick={() => { setEmail('teacher@test.com'); setPassword('pass'); }} style={{ padding: '10px', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', cursor: 'pointer', textAlign: 'center', fontSize: '0.85rem', color: '#94a3b8', border: '1px solid transparent', transition: 'all 0.2s' }} className="hover:bg-white/5 hover:border-white/10">
-                            Teacher
+                        <div onClick={fillTeacher} style={{ padding: '10px', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', cursor: 'pointer', textAlign: 'center', fontSize: '0.85rem', color: '#94a3b8', border: '1px solid transparent', transition: 'all 0.2s' }} className="hover:bg-white/5 hover:border-white/10">
+                            Teacher (Piram)
                         </div>
-                        <div onClick={() => { setEmail('student@test.com'); setPassword('pass'); }} style={{ padding: '10px', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', cursor: 'pointer', textAlign: 'center', fontSize: '0.85rem', color: '#94a3b8' }} className="hover:bg-white/5 hover:border-white/10">
-                            Student
+                        <div onClick={fillStudent} style={{ padding: '10px', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', cursor: 'pointer', textAlign: 'center', fontSize: '0.85rem', color: '#94a3b8' }} className="hover:bg-white/5 hover:border-white/10">
+                            Student (Aditya)
                         </div>
                     </div>
                 </div>
