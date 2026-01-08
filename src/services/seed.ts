@@ -1,5 +1,5 @@
 import { db } from "../lib/firebase";
-import { doc, setDoc, collection } from "firebase/firestore";
+import { doc, setDoc } from "firebase/firestore";
 
 // Preloaded Users
 const TEACHERS = [

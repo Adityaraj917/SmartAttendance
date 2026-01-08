@@ -27,7 +27,7 @@ export default function StudentDashboard() {
     const [distance, setDistance] = useState<number | null>(null);
 
     // Track the attendance Doc ID for heartbeats
-    const [attendanceDocId, setAttendanceDocId] = useState<string | null>(null);
+
     const heartbeatInterval = useRef<number | null>(null);
 
     // Real-time Session Listener
@@ -129,7 +129,7 @@ export default function StudentDashboard() {
             if (!querySnapshot.empty) {
                 setAttendanceStatus('MARKED');
                 setMsg("Already Marked Present");
-                setAttendanceDocId(querySnapshot.docs[0].id);
+
                 startHeartbeat(querySnapshot.docs[0].id);
                 return;
             }
@@ -145,7 +145,7 @@ export default function StudentDashboard() {
             });
 
             setAttendanceStatus('MARKED');
-            setAttendanceDocId(docRef.id);
+
             startHeartbeat(docRef.id);
 
         } catch (e: any) {

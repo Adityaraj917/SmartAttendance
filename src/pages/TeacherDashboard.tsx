@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../lib/firebase';
-import { collection, addDoc, updateDoc, doc, onSnapshot, query, where, getDocs, serverTimestamp, orderBy } from 'firebase/firestore';
+import { collection, addDoc, updateDoc, doc, onSnapshot, query, where, getDocs, serverTimestamp } from 'firebase/firestore';
 import { QRCodeCanvas } from 'qrcode.react';
 import { Users, MapPin, LogOut, Clock, Sparkles } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';

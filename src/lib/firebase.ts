@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
+import { getFirestore } from "firebase/firestore";
 
 // TODO: REPLACE WITH YOUR FIREBASE CONFIG
 // For now, I will add placeholders. You can fill these in, or if you provide them I can add them.
