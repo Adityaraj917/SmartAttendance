@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../lib/firebase';
 import { collection, query, where, onSnapshot, addDoc, serverTimestamp, doc, updateDoc, getDocs } from 'firebase/firestore';
-import { Html5QrcodeScanner } from 'html5-qrcode';
+import { Html5Qrcode } from 'html5-qrcode';
 import { MapPin, CheckCircle, LogOut, ScanLine, Wifi, Zap, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
@@ -110,21 +110,57 @@ export default function StudentDashboard() {
 
     const startScanner = () => { if (selectedSession) { setScanning(true); setMsg(''); } };
 
-    // QR Logic
+    // QR Scanner Logic (Refactored for Stability)
     useEffect(() => {
-        if (scanning && selectedSession) {
-            const scanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 }, false);
-            scanner.render(async (txt) => {
-                scanner.clear();
-                setScanning(false);
-                if (location) {
-                    const d = getDistanceInMeters(location.lat, location.lon, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon);
-                    await markAttendance(selectedSession, txt, d);
+        let html5QrCode: Html5Qrcode | null = null;
+
+        const startScanning = async () => {
+            if (scanning && selectedSession) {
+                try {
+                    // Slight delay to ensure DOM element exists
+                    await new Promise(r => setTimeout(r, 100));
+
+                    if (!document.getElementById("reader")) return;
+
+                    html5QrCode = new Html5Qrcode("reader");
+                    const config = { fps: 10, qrbox: { width: 250, height: 250 } };
+
+                    await html5QrCode.start(
+                        { facingMode: "environment" },
+                        config,
+                        async (decodedText) => {
+                            // Success
+                            await html5QrCode?.stop().catch(console.error);
+                            html5QrCode?.clear();
+                            setScanning(false);
+
+                            if (location) {
+                                const d = getDistanceInMeters(location.lat, location.lon, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon);
+                                await markAttendance(selectedSession, decodedText, d);
+                            }
+                        },
+                        (_errorMessage) => {
+                            // parse error, ignore
+                        }
+                    );
+                } catch (err) {
+                    console.error("Scanner Error:", err);
+                    setMsg("Scanner failed to start. Check permissions.");
+                    setScanning(false);
                 }
-            }, (err) => { console.log(err); });
-            return () => { try { scanner.clear(); } catch (e) { } };
+            }
+        };
+
+        if (scanning) {
+            startScanning();
         }
-    }, [scanning, selectedSession, location]);
+
+        return () => {
+            if (html5QrCode && html5QrCode.isScanning) {
+                html5QrCode.stop().then(() => html5QrCode?.clear()).catch(console.error);
+            }
+        };
+    }, [scanning, selectedSession]);
 
     const markAttendance = async (session: Session, qrCode?: string, currentDistance?: number) => {
         if (!user) return;

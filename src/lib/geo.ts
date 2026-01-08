@@ -26,13 +26,16 @@ export const getDistanceInMeters = (lat1: number, lon1: number, lat2: number, lo
 /**
  * Promisified getCurrentPosition with High Accuracy enforcement.
  */
-export const getCurrentLocation = (maxAgeMs: number = 10000): Promise<GeoLocation> => {
+export const getCurrentLocation = (): Promise<GeoLocation> => {
     return new Promise((resolve, reject) => {
-        if (!navigator.geolocation) {
-            reject(new Error("Geolocation is not supported by this browser."));
-            return;
-        }
+        if (!navigator.geolocation) return reject(new Error("Geolocation not supported"));
 
+        // Options for High Accuracy
+        const highAccuracyOptions = { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 };
+        // Options for Low Accuracy (Fallback)
+        const lowAccuracyOptions = { enableHighAccuracy: false, timeout: 10000, maximumAge: 0 };
+
+        // 1. Try High Accuracy
         navigator.geolocation.getCurrentPosition(
             (pos) => {
                 resolve({
@@ -42,20 +45,28 @@ export const getCurrentLocation = (maxAgeMs: number = 10000): Promise<GeoLocatio
                     timestamp: pos.timestamp
                 });
             },
-            (err) => {
-                let msg = "Unknown GPS Error";
-                switch (err.code) {
-                    case err.PERMISSION_DENIED: msg = "Location permission denied. Please enable location services."; break;
-                    case err.POSITION_UNAVAILABLE: msg = "Location information is unavailable."; break;
-                    case err.TIMEOUT: msg = "The request to get user location timed out."; break;
-                }
-                reject(new Error(msg));
+            (errHigh) => {
+                console.warn("High Accuracy Geo failed, trying low accuracy...", errHigh);
+
+                // 2. Fallback: Try Low Accuracy (WiFi/IP)
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => {
+                        console.log("Low Accuracy Geo succeeded");
+                        resolve({
+                            lat: pos.coords.latitude,
+                            lon: pos.coords.longitude,
+                            accuracy: pos.coords.accuracy,
+                            timestamp: pos.timestamp
+                        });
+                    },
+                    (errLow) => {
+                        console.error("All Geo attempts failed", errLow);
+                        reject(errHigh); // Reject with original error
+                    },
+                    lowAccuracyOptions
+                );
             },
-            {
-                enableHighAccuracy: true,
-                timeout: 15000,
-                maximumAge: maxAgeMs // Accept cached positions up to X ms old
-            }
+            highAccuracyOptions
         );
     });
 };
