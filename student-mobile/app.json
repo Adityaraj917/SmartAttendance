@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -30,11 +30,12 @@
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.ACCESS_FINE_LOCATION",
-        "android.permission.ACESS_COARSE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.BLUETOOTH",
         "android.permission.BLUETOOTH_ADMIN",
         "android.permission.BLUETOOTH_CONNECT",
-        "android.permission.BLUETOOTH_SCAN"
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.RECORD_AUDIO"
       ]
     },
     "web": {
@@ -63,7 +64,22 @@
           "locationAlwaysAndWhenInUsePermission": "Allow $(PRODUCT_NAME) to verify your location in the classroom."
         }
       ],
-      "expo-build-properties"
-    ]
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 23,
+            "compileSdkVersion": 34,
+            "targetSdkVersion": 34,
+            "buildToolsVersion": "34.0.0"
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "38df0048-8bda-4200-98c2-1d8995b24c0a"
+      }
+    }
   }
 }
