@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../lib/firebase';
-import { collection, query, where, onSnapshot, addDoc, serverTimestamp, updateDoc, getDocs, orderBy, limit } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, addDoc, serverTimestamp, getDocs, orderBy, limit, doc, runTransaction, setDoc } from 'firebase/firestore';
 import { Html5Qrcode } from 'html5-qrcode';
-import { CheckCircle, LogOut, ScanLine, Wifi, Zap, History, Calendar, Clock, MapPin } from 'lucide-react';
+import { CheckCircle, LogOut, ScanLine, Wifi, Zap, History, Calendar, Clock, MapPin, Lock } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { getDistanceInMeters } from '../lib/geo'; // Import shared utility
@@ -107,11 +107,13 @@ export default function StudentDashboard() {
                         if (d <= s.classroomLocation.radius + 15) {
                             console.log(`Auto-joining session: ${s.subject}`);
                             setSelectedSessionId(s.id);
-                            // Auto-join relies on GPS presence mostly, but we can verify BLE if provided or just mark as GPS-verified
-                            // The prompt implies strict "Connection Validation".
-                            // If auto-joining, we assume connection is valid via GPS.
-                            await markAttendance(s, undefined, d);
+                            // Auto-join implies CONNECTION, not Marking (marking needs QR)
+                            // But we can try to joinSession() if we are close enough?
+                            // For now, let's just select it. Join implies strict binding.
+                            // If we auto-call joinSession, it might bind randomly. Prompt says "Student can ONLY join by Scanning QR or Manual UUID".
+                            // So Auto-Join should probably just SELECT the session and prompt user to "Scan to Join".
                             break;
+                            // Previously: called markAttendance. Now: Just Select.
                         }
                     }
                 }
@@ -196,84 +198,133 @@ export default function StudentDashboard() {
 
     const respondToHeartbeat = async (sessionId: string, nonce: string) => {
         if (!user) return;
-        // Find my attendance doc
-        // Optimization: Save docId in ref or state after marking
-        const q = query(collection(db, "attendance"), where("sessionId", "==", sessionId), where("studentId", "==", user.id));
-        const snapshot = await getDocs(q);
-        if (!snapshot.empty) {
-            const docRef = snapshot.docs[0].ref;
-            await updateDoc(docRef, {
-                lastHeartbeatResponse: nonce,
-                heartbeatLastSeen: serverTimestamp(),
-                location: location // update location proof
+        try {
+            const hbRef = doc(db, "sessions", sessionId, "heartbeats", user.id);
+            await setDoc(hbRef, {
+                studentId: user.id,
+                nonce: nonce,
+                timestamp: serverTimestamp(),
+                location: location
             });
-            console.log("Responded to heartbeat:", nonce);
+            console.log("Heartbeat ACK sent:", nonce);
+        } catch (e) {
+            console.error("Heartbeat ACK failed", e);
         }
+    };
+
+    // 3. Connection Status Listener
+    useEffect(() => {
+        if (!user || !selectedSessionId) return;
+
+        const docRef = doc(db, "sessions", selectedSessionId, "connectedStudents", user.id);
+        const unsubscribe = onSnapshot(docRef, (snap) => {
+            if (snap.exists() && snap.data().status === 'CONNECTED') {
+                joinedSessionIdRef.current = selectedSessionId;
+            } else {
+                joinedSessionIdRef.current = null;
+            }
+        });
+        return () => unsubscribe();
+    }, [user, selectedSessionId]);
+
+    const joinSession = async (session: Session) => {
+        if (!user || !deviceId) throw new Error("User or Device Identity Missing");
+
+        const connectionRef = doc(db, "sessions", session.id, "connectedStudents", user.id);
+
+        await runTransaction(db, async (transaction) => {
+            const sfDoc = await transaction.get(connectionRef);
+
+            if (sfDoc.exists()) {
+                const data = sfDoc.data();
+                if (data.deviceId !== deviceId) {
+                    throw new Error("Device Mismatch: You cannot join from a different device.");
+                }
+                // Already connected, ensure status is CONNECTED
+                if (data.status !== 'CONNECTED') {
+                    transaction.update(connectionRef, { status: 'CONNECTED', lastHeartbeat: serverTimestamp() });
+                }
+            } else {
+                // New Connection - Bind Device
+                transaction.set(connectionRef, {
+                    studentId: user.id,
+                    studentName: user.name,
+                    deviceId: deviceId,
+                    joinedAt: serverTimestamp(),
+                    lastHeartbeat: serverTimestamp(),
+                    status: 'CONNECTED'
+                });
+            }
+        });
     };
 
     const markAttendance = async (session: Session, code?: string, currentDistance?: number) => {
         if (!user) return;
-        setAttendanceStatus('JOINING');
-        setMsg("Verifying Connection...");
+        setAttendanceStatus('JOINING'); // Status for UI spinner
+        setMsg("Verifying Identity & Location...");
 
-        // 1. Validate Code (QR or Manual)
-        // Code must match either currentQrCode OR bleServiceUUID (Logical BLE)
-        if (code) {
-            const isQrMatch = code === session.currentQrCode;
-            const isBleMatch = code === session.bleServiceUUID; // Logical BLE Manual Entry
-            const isSessionIdMatch = code === session.id;
-
-            if (!isQrMatch && !isBleMatch && !isSessionIdMatch) {
-                setAttendanceStatus('FAILED');
-                setMsg("Invalid Code/ID provided.");
-                return;
-            }
-        }
-
-        // 2. Validate Geo
-        const dist = currentDistance ?? 99999;
-        if (dist > session.classroomLocation.radius + 50) {
-            setAttendanceStatus('FAILED');
-            setMsg(`Too far! Move closer (${Math.round(dist)}m)`);
-            return;
-        }
-
-        // 3. Mark
         try {
-            // Check existing
-            const q = query(collection(db, "attendance"), where("sessionId", "==", session.id), where("studentId", "==", user.id));
-            const existing = await getDocs(q);
+            // Step 1: Ensure Connected (Device Binding)
+            await joinSession(session);
 
+            // Step 2: Validate Geo
+            const dist = currentDistance ?? 99999;
+            // Strict 100m or Session Radius + Buffer. prompt says strict "Inside radius".
+            // We use session.classroomLocation.radius.
+            // Adding 20m buffer for GPS noise as requested "Increase tolerance slightly".
+            const maxRadius = session.classroomLocation.radius + 20;
+
+            if (dist > maxRadius) {
+                throw new Error(`Location violation: You are ${Math.round(dist - maxRadius)}m outside the zone.`);
+            }
+
+            // Step 3: Validate Code (Dynamic QR)
+            if (code) {
+                const isQrMatch = code === session.currentQrCode;
+                // BLE UUID also allowed for manual entry as per prompt "Manually entering BLE UUID"
+                const isBleMatch = code === session.bleServiceUUID;
+
+                if (!isQrMatch && !isBleMatch) {
+                    throw new Error("Invalid Session Code or QR Expired.");
+                }
+            } else {
+                // No code provided? Prompt says "Prevent attendance without QR".
+                throw new Error("Attendance requires active QR Scan or Code Verification.");
+            }
+
+            // Step 4: Mark in Attendance Collection
+            // Check if already marked
+            const attendanceQ = query(collection(db, "attendance"), where("sessionId", "==", session.id), where("studentId", "==", user.id));
+            const existing = await getDocs(attendanceQ);
             if (!existing.empty) {
                 setAttendanceStatus('MARKED');
-                setMsg("Already Joined!");
-                joinedSessionIdRef.current = session.id;
+                setMsg("Attendance already recorded.");
                 return;
             }
 
-            // Create
             await addDoc(collection(db, "attendance"), {
                 sessionId: session.id,
                 sessionSubject: session.subject,
                 classroomName: session.classroomName,
                 studentId: user.id,
                 studentName: user.name,
-                status: code ? 'PRESENT (VERIFIED)' : 'PRESENT (GPS)',
+                status: 'PRESENT',
                 timestamp: serverTimestamp(),
                 heartbeatLastSeen: serverTimestamp(),
-                deviceId: deviceId, // Device Binding
+                deviceId: deviceId,
                 location: location
             });
 
             setAttendanceStatus('MARKED');
-            joinedSessionIdRef.current = session.id;
+            setMsg("Attendance Verified & Marked!");
+
         } catch (e: any) {
             setAttendanceStatus('FAILED');
             setMsg(e.message);
         }
     };
 
-    const handleManualJoin = () => {
+    const handleManualJoin = async () => {
         // Try to find session by ID/UUID
         const session = sessions.find(s => s.id === manualId || s.bleServiceUUID === manualId);
 
@@ -282,16 +333,21 @@ export default function StudentDashboard() {
             return;
         }
 
-        const d = location ? getDistanceInMeters(location.lat, location.lon, session.classroomLocation.lat, session.classroomLocation.lon) : 99999;
-
-        // Manual join implies we have the code/id (manualId)
-        markAttendance(session, manualId, d);
+        try {
+            setMsg("Connecting...");
+            await joinSession(session);
+            setMsg("Successfully Joined! Now Scan QR to Mark Attendance.");
+            setSelectedSessionId(session.id);
+        } catch (e: any) {
+            setMsg(e.message);
+        }
     };
+
+    const isConnected = joinedSessionIdRef.current === selectedSessionId;
 
     return (
         <div className="dashboard-container">
             <header className="header">
-                {/* ... Header UI (same as before) ... */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
                     <div style={{ width: '48px', height: '48px', borderRadius: '12px', background: 'linear-gradient(135deg, #10b981, #059669)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                         <Zap color="white" size={24} fill="currentColor" />
@@ -302,7 +358,9 @@ export default function StudentDashboard() {
                             {user?.name}
                             <span style={{ margin: '0 8px', opacity: 0.3 }}>|</span>
                             {location ? (
-                                <span style={{ color: '#34d399' }}>GPS Active ±{Math.round(location.accuracy || 0)}m</span>
+                                <span style={{ color: '#34d399', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                    <MapPin size={12} /> GPS Active ±{Math.round(location.accuracy || 0)}m
+                                </span>
                             ) : <span className="text-warning">Locating...</span>}
                         </p>
                     </div>
@@ -315,8 +373,8 @@ export default function StudentDashboard() {
             {attendanceStatus === 'MARKED' ? (
                 <div className="glass-panel" style={{ padding: '3rem', textAlign: 'center', margin: '2rem auto', maxWidth: '500px' }}>
                     <CheckCircle size={64} style={{ color: '#34d399', margin: '0 auto 1rem' }} />
-                    <h2>Checked In: {selectedSession?.subject}</h2>
-                    <p>Stay within range. Auto-responding to heartbeats.</p>
+                    <h2>Attendance Recorded</h2>
+                    <p style={{ color: '#94a3b8' }}>You are present in {selectedSession?.subject}</p>
                     <div className="status-badge status-active" style={{ display: 'inline-flex', gap: '8px', marginTop: '1rem' }}>
                         <Wifi size={14} /> LIVE
                     </div>
@@ -324,23 +382,45 @@ export default function StudentDashboard() {
             ) : (
                 <div style={{ padding: '0 1rem', maxWidth: '800px', margin: '0 auto', paddingBottom: '4rem' }}>
 
+                    {/* Connection Status Banner */}
+                    <AnimatePresence>
+                        {isConnected && selectedSession && (
+                            <motion.div
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                                className="glass-panel"
+                                style={{ background: 'rgba(16, 185, 129, 0.1)', borderColor: '#10b981', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '12px', padding: '1rem' }}
+                            >
+                                <Lock size={20} className="text-accent" />
+                                <div>
+                                    <strong style={{ color: '#34d399' }}>Securely Connected to {selectedSession.subject}</strong>
+                                    <div style={{ fontSize: '0.8rem', opacity: 0.8 }}>Device ID Bound. Waiting for Attendance QR Scan...</div>
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+
                     {/* Top Action Bar (Scan / Manual) */}
                     <div className="glass-panel" style={{ padding: '1.5rem', marginBottom: '2rem' }}>
                         <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                            <button className="btn-primary" onClick={() => startScanner()} style={{ flex: 1 }}>
-                                <ScanLine size={18} /> Scan Code
+                            <button className="btn-primary" onClick={() => startScanner()} style={{ flex: 1 }} disabled={scanning}>
+                                <ScanLine size={18} /> {scanning ? 'Scanning...' : (isConnected ? 'Scan Attendance QR' : 'Scan to Join')}
                             </button>
-                            <div style={{ width: '1px', height: '40px', background: 'rgba(255,255,255,0.1)' }}></div>
-                            <div style={{ flex: 2, display: 'flex', gap: '10px' }}>
-                                <input
-                                    type="text"
-                                    placeholder="Enter Session ID / UUID"
-                                    value={manualId}
-                                    onChange={(e) => setManualId(e.target.value)}
-                                    style={{ flex: 1, background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', padding: '0 12px', borderRadius: '8px', color: 'white' }}
-                                />
-                                <button className="btn-secondary" onClick={handleManualJoin}>Join</button>
-                            </div>
+                            {!isConnected && (
+                                <>
+                                    <div style={{ width: '1px', height: '40px', background: 'rgba(255,255,255,0.1)' }}></div>
+                                    <div style={{ flex: 2, display: 'flex', gap: '10px' }}>
+                                        <input
+                                            type="text"
+                                            placeholder="Session ID / UUID"
+                                            value={manualId}
+                                            onChange={(e) => setManualId(e.target.value)}
+                                            style={{ flex: 1, background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', padding: '0 12px', borderRadius: '8px', color: 'white' }}
+                                        />
+                                        <button className="btn-secondary" onClick={handleManualJoin}>Join</button>
+                                    </div>
+                                </>
+                            )}
                         </div>
                         {msg && <div style={{ marginTop: '1rem', color: '#facc15', fontSize: '0.9rem', textAlign: 'center' }}>{msg}</div>}
                         {scanning && <div id="reader" style={{ marginTop: '1rem', borderRadius: '8px', overflow: 'hidden' }}></div>}

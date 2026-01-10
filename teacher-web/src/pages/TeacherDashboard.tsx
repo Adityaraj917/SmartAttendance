@@ -110,26 +110,37 @@ export default function TeacherDashboard() {
         checkActiveSession();
     }, [user?.id]);
 
+    const [connectedStudents, setConnectedStudents] = useState<any[]>([]);
+
     // Real-time Attendance Listener
     useEffect(() => {
         if (!session?.id) return;
 
-        const q = query(
-            collection(db, "attendance"),
-            where("sessionId", "==", session.id)
-        );
-
-        const unsubscribe = onSnapshot(q, (snapshot) => {
+        // 1. Attendance (Marked)
+        const qVideo = query(collection(db, "attendance"), where("sessionId", "==", session.id));
+        const unsubscribeAttendance = onSnapshot(qVideo, (snapshot) => {
             const list: AttendanceRecord[] = [];
             snapshot.forEach((doc) => {
                 list.push({ id: doc.id, ...doc.data() } as AttendanceRecord);
             });
-            // Client-side sort
             list.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
             setAttendance(list);
         });
 
-        return () => unsubscribe();
+        // 2. Connected Students (Joined)
+        const qConnected = collection(db, "sessions", session.id, "connectedStudents");
+        const unsubscribeConnected = onSnapshot(qConnected, (snapshot) => {
+            const list: any[] = [];
+            snapshot.forEach(doc => {
+                list.push({ id: doc.id, ...doc.data() });
+            });
+            setConnectedStudents(list);
+        });
+
+        return () => {
+            unsubscribeAttendance();
+            unsubscribeConnected();
+        };
     }, [session?.id]);
 
     const createSession = async (e: React.FormEvent) => {
@@ -423,43 +434,71 @@ export default function TeacherDashboard() {
                                     </div>
                                 ) : (
                                     <div style={{ display: 'grid', gap: '12px' }}>
-                                        {attendance.map((record, i) => {
-                                            // Calculate distance if student has location
-                                            const dist = record.location ? getDistanceInMeters(
-                                                record.location.lat, record.location.lon,
-                                                session.classroomLocation.lat, session.classroomLocation.lon
-                                            ) : null;
+                                        {/* Show Connected Students who haven't marked yet first, or just mix them? */}
+                                        {(() => {
+                                            // Merge Logic
+                                            const map = new Map();
 
-                                            // Check Last Seen (Heartbeat) - if > 15 mins (900s), maybe inactive
-                                            const now = new Date();
-                                            const lastSeen = record.heartbeatLastSeen?.seconds ? new Date(record.heartbeatLastSeen.seconds * 1000) : null;
-                                            const isOnline = lastSeen ? (now.getTime() - lastSeen.getTime()) < 15 * 60 * 1000 : true;
+                                            // 1. Add Connected
+                                            connectedStudents.forEach(s => {
+                                                map.set(s.studentId, {
+                                                    name: s.studentName,
+                                                    status: 'JOINED', // Initial status
+                                                    isOnline: true, // If in connected list, check heartbeat? 
+                                                    // Connected list has lastHeartbeat. 
+                                                    // We can check s.lastHeartbeat vs Now
+                                                    lastHeartbeat: s.lastHeartbeat
+                                                });
+                                            });
 
-                                            return (
-                                                <motion.div
-                                                    key={i}
-                                                    initial={{ opacity: 0, y: 10 }}
-                                                    animate={{ opacity: 1, y: 0 }}
-                                                    transition={{ delay: i * 0.05 }}
-                                                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.03)' }}
-                                                >
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                                        <div style={{ width: '36px', height: '36px', borderRadius: '50%', background: isOnline ? 'linear-gradient(135deg, #10b981, #059669)' : 'linear-gradient(135deg, #94a3b8, #64748b)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontWeight: 'bold', fontSize: '0.9rem' }}>
-                                                            {record.studentName.charAt(0)}
+                                            // 2. Overlay Attendance (Marked)
+                                            attendance.forEach(a => {
+                                                const existing = map.get(a.studentId);
+                                                map.set(a.studentId, {
+                                                    name: a.studentName,
+                                                    status: a.status, // PRESENT / VERIFIED
+                                                    location: a.location,
+                                                    lastHeartbeat: a.heartbeatLastSeen || existing?.lastHeartbeat,
+                                                    isOnline: true // Logic below will refine
+                                                });
+                                            });
+
+                                            return Array.from(map.entries()).map(([sid, data], i) => {
+                                                const now = new Date();
+                                                const lastSeen = data.lastHeartbeat?.seconds ? new Date(data.lastHeartbeat.seconds * 1000) : null;
+                                                const isOnline = lastSeen ? (now.getTime() - lastSeen.getTime()) < 15 * 60 * 1000 : true;
+                                                const isMarked = data.status.includes('PRESENT');
+
+                                                const dist = data.location ? getDistanceInMeters(
+                                                    data.location.lat, data.location.lon,
+                                                    session.classroomLocation.lat, session.classroomLocation.lon
+                                                ) : null;
+
+                                                return (
+                                                    <motion.div
+                                                        key={sid}
+                                                        initial={{ opacity: 0, y: 10 }}
+                                                        animate={{ opacity: 1, y: 0 }}
+                                                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px', background: isMarked ? 'rgba(16, 185, 129, 0.1)' : 'rgba(255,255,255,0.02)', borderRadius: '12px', border: isMarked ? '1px solid #10b981' : '1px solid rgba(255,255,255,0.03)' }}
+                                                    >
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                                            <div style={{ width: '36px', height: '36px', borderRadius: '50%', background: isOnline ? (isMarked ? 'linear-gradient(135deg, #10b981, #059669)' : '#6366f1') : '#64748b', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontWeight: 'bold', fontSize: '0.9rem' }}>
+                                                                {data.name.charAt(0)}
+                                                            </div>
+                                                            <div>
+                                                                <p style={{ margin: 0, fontWeight: 500 }}>{data.name}</p>
+                                                                <p style={{ margin: 0, fontSize: '0.8rem', color: '#64748b' }}>
+                                                                    {dist !== null ? `${Math.round(dist)}m • ` : ''} {data.status}
+                                                                </p>
+                                                            </div>
                                                         </div>
-                                                        <div>
-                                                            <p style={{ margin: 0, fontWeight: 500 }}>{record.studentName} <span style={{ fontSize: '0.7em', padding: '2px 4px', background: 'rgba(255,255,255,0.1)', borderRadius: '4px' }}>{isOnline ? 'LIVE' : 'AWAY'}</span></p>
-                                                            <p style={{ margin: 0, fontSize: '0.8rem', color: '#64748b' }}>
-                                                                {dist !== null ? `${Math.round(dist)}m away` : 'Locating...'} • {record.status}
-                                                            </p>
+                                                        <div className={`status-badge ${isOnline ? 'status-active' : ''}`} style={{ opacity: isOnline ? 1 : 0.5 }}>
+                                                            {isOnline ? 'Active' : 'Silent'}
                                                         </div>
-                                                    </div>
-                                                    <div className={`status-badge ${isOnline ? 'status-active' : ''}`} style={{ opacity: isOnline ? 1 : 0.5 }}>
-                                                        {isOnline ? 'Verified' : 'Silent'}
-                                                    </div>
-                                                </motion.div>
-                                            )
-                                        })}
+                                                    </motion.div>
+                                                );
+                                            });
+                                        })()}
                                     </div>
                                 )}
                             </div>
