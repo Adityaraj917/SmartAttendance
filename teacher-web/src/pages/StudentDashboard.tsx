@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../lib/firebase';
-import { collection, query, where, onSnapshot, addDoc, serverTimestamp, updateDoc, getDocs } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, addDoc, serverTimestamp, updateDoc, getDocs, orderBy, limit } from 'firebase/firestore';
 import { Html5Qrcode } from 'html5-qrcode';
-import { CheckCircle, LogOut, ScanLine, Wifi, Zap } from 'lucide-react';
+import { CheckCircle, LogOut, ScanLine, Wifi, Zap, History, Calendar, Clock, MapPin } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { getDistanceInMeters } from '../lib/geo'; // Import shared utility
@@ -19,10 +19,20 @@ interface Session {
     heartbeatNonce?: string;
 }
 
+interface AttendanceRecord {
+    id: string;
+    sessionId: string;
+    sessionSubject: string;
+    classroomName: string;
+    status: string;
+    timestamp: any;
+}
+
 export default function StudentDashboard() {
     const { user, deviceId, logout } = useAuth();
     const navigate = useNavigate();
     const [sessions, setSessions] = useState<Session[]>([]);
+    const [history, setHistory] = useState<AttendanceRecord[]>([]);
     const [scanning, setScanning] = useState(false);
     const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
     const [attendanceStatus, setAttendanceStatus] = useState<'NONE' | 'JOINING' | 'MARKED' | 'FAILED'>('NONE');
@@ -48,6 +58,25 @@ export default function StudentDashboard() {
         });
         return () => unsubscribe();
     }, []);
+
+    // 2. Attendance History Listener
+    useEffect(() => {
+        if (!user) return;
+        const q = query(
+            collection(db, "attendance"),
+            where("studentId", "==", user.id),
+            orderBy("timestamp", "desc"),
+            limit(20)
+        );
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const list: AttendanceRecord[] = [];
+            snapshot.forEach(doc => {
+                list.push({ id: doc.id, ...doc.data() } as AttendanceRecord);
+            });
+            setHistory(list);
+        });
+        return () => unsubscribe();
+    }, [user]);
 
     // 2. Geolocation Tracker & Auto-Join Logic
     useEffect(() => {
@@ -109,13 +138,18 @@ export default function StudentDashboard() {
         }
     };
 
-    const startScanner = () => { if (selectedSession) { setScanning(true); setMsg(''); } };
+    const startScanner = (session?: Session) => {
+        if (session) {
+            setSelectedSessionId(session.id);
+        }
+        setScanning(true);
+        setMsg('Scan Teacher QR Code');
+    };
 
-    // QR Logic (Unchanged mostly, matches UUID)
+    // QR Logic 
     useEffect(() => {
         let html5QrCode: Html5Qrcode | null = null;
-        if (scanning && selectedSession) {
-            // ... scanner init (simplified for brevity, logic same as before but calling markAttendance with Code)
+        if (scanning) {
             const init = async () => {
                 await new Promise(r => setTimeout(r, 100));
                 if (!document.getElementById("reader")) return;
@@ -125,16 +159,31 @@ export default function StudentDashboard() {
                         await html5QrCode?.stop();
                         html5QrCode?.clear();
                         setScanning(false);
-                        const d = location ? getDistanceInMeters(location.lat, location.lon, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon) : 99999;
-                        await markAttendance(selectedSession, decodedText, d);
+
+                        // If we scanned a code, we need to find which session it matches
+                        let targetSession = selectedSession;
+
+                        // If no session selected, try to find by QR match
+                        if (!targetSession) {
+                            targetSession = sessions.find(s => s.currentQrCode === decodedText || s.bleServiceUUID === decodedText || s.id === decodedText) || null;
+                        }
+
+                        if (targetSession) {
+                            const d = location ? getDistanceInMeters(location.lat, location.lon, targetSession.classroomLocation.lat, targetSession.classroomLocation.lon) : 99999;
+                            await markAttendance(targetSession, decodedText, d);
+                        } else {
+                            setMsg("Invalid QR Code or Session not active.");
+                        }
                     },
-                    () => { }
+                    () => {
+                        // parse error, ignore
+                    }
                 );
             };
             init();
         }
         return () => { if (html5QrCode && html5QrCode.isScanning) html5QrCode.stop().then(() => html5QrCode?.clear()); }
-    }, [scanning, selectedSession]);
+    }, [scanning, sessions, selectedSession]);
 
     // HEARTBEAT LISTENER
     // Listen for changes in selectedSession.heartbeatNonce
@@ -205,6 +254,8 @@ export default function StudentDashboard() {
             // Create
             await addDoc(collection(db, "attendance"), {
                 sessionId: session.id,
+                sessionSubject: session.subject,
+                classroomName: session.classroomName,
                 studentId: user.id,
                 studentName: user.name,
                 status: code ? 'PRESENT (VERIFIED)' : 'PRESENT (GPS)',
@@ -223,9 +274,18 @@ export default function StudentDashboard() {
     };
 
     const handleManualJoin = () => {
-        if (!selectedSession) return;
-        const d = location ? getDistanceInMeters(location.lat, location.lon, selectedSession.classroomLocation.lat, selectedSession.classroomLocation.lon) : 99999;
-        markAttendance(selectedSession, manualId, d);
+        // Try to find session by ID/UUID
+        const session = sessions.find(s => s.id === manualId || s.bleServiceUUID === manualId);
+
+        if (!session) {
+            setMsg("Session not found with this ID/UUID.");
+            return;
+        }
+
+        const d = location ? getDistanceInMeters(location.lat, location.lon, session.classroomLocation.lat, session.classroomLocation.lon) : 99999;
+
+        // Manual join implies we have the code/id (manualId)
+        markAttendance(session, manualId, d);
     };
 
     return (
@@ -262,50 +322,68 @@ export default function StudentDashboard() {
                     </div>
                 </div>
             ) : (
-                <div style={{ padding: '0 1rem', maxWidth: '600px', margin: '0 auto' }}>
-                    {/* Session List & Auto-Join UI */}
-                    <div style={{ marginBottom: '2rem' }}>
-                        <h3 style={{ color: '#94a3b8' }}>Nearby Sessions</h3>
-                        {sessions.map(s => (
-                            <div key={s.id} onClick={() => handleSelectSession(s)} className={`glass-panel ${selectedSessionId === s.id ? 'border-accent' : ''}`} style={{ padding: '1.5rem', marginBottom: '1rem', cursor: 'pointer', border: selectedSessionId === s.id ? '2px solid #6366f1' : '1px solid rgba(255,255,255,0.1)' }}>
-                                <h4>{s.subject}</h4>
-                                <p style={{ margin: 0, color: '#64748b' }}>{s.classroomName}</p>
+                <div style={{ padding: '0 1rem', maxWidth: '800px', margin: '0 auto', paddingBottom: '4rem' }}>
+
+                    {/* Top Action Bar (Scan / Manual) */}
+                    <div className="glass-panel" style={{ padding: '1.5rem', marginBottom: '2rem' }}>
+                        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                            <button className="btn-primary" onClick={() => startScanner()} style={{ flex: 1 }}>
+                                <ScanLine size={18} /> Scan Code
+                            </button>
+                            <div style={{ width: '1px', height: '40px', background: 'rgba(255,255,255,0.1)' }}></div>
+                            <div style={{ flex: 2, display: 'flex', gap: '10px' }}>
+                                <input
+                                    type="text"
+                                    placeholder="Enter Session ID / UUID"
+                                    value={manualId}
+                                    onChange={(e) => setManualId(e.target.value)}
+                                    style={{ flex: 1, background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', padding: '0 12px', borderRadius: '8px', color: 'white' }}
+                                />
+                                <button className="btn-secondary" onClick={handleManualJoin}>Join</button>
                             </div>
-                        ))}
+                        </div>
+                        {msg && <div style={{ marginTop: '1rem', color: '#facc15', fontSize: '0.9rem', textAlign: 'center' }}>{msg}</div>}
+                        {scanning && <div id="reader" style={{ marginTop: '1rem', borderRadius: '8px', overflow: 'hidden' }}></div>}
                     </div>
 
-                    {/* Manual / QR Actions */}
-                    <AnimatePresence>
-                        {selectedSession && (
-                            <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} className="glass-panel" style={{ padding: '2rem' }}>
-                                <h3>Join {selectedSession.subject}</h3>
-                                {msg && <div className="p-3 mb-4 rounded bg-white/5 text-center">{msg}</div>}
-
-                                <div style={{ display: 'grid', gap: '1rem' }}>
-                                    <button className="btn-primary" onClick={startScanner}>
-                                        <ScanLine size={18} /> Scan QR Code
-                                    </button>
-
-                                    <div style={{ position: 'relative', marginTop: '1rem' }}>
-                                        <div style={{ position: 'absolute', top: '-10px', left: '50%', transform: 'translateX(-50%)', background: '#1e293b', padding: '0 8px', color: '#94a3b8', fontSize: '0.8rem' }}>OR</div>
-                                        <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)' }} />
-                                    </div>
-
-                                    <div style={{ display: 'flex', gap: '10px', marginTop: '1rem' }}>
-                                        <input
-                                            type="text"
-                                            placeholder="Enter Session ID or BLE UUID"
-                                            value={manualId}
-                                            onChange={e => setManualId(e.target.value)}
-                                            style={{ flex: 1, padding: '12px', borderRadius: '8px', background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.1)', color: 'white' }}
-                                        />
-                                        <button className="btn-secondary" onClick={handleManualJoin}>Join</button>
-                                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
+                        {/* Nearby Sessions */}
+                        <div>
+                            <h3 style={{ color: '#94a3b8', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <MapPin size={16} /> Nearby Sessions
+                            </h3>
+                            {sessions.length === 0 && <p style={{ color: '#64748b', fontSize: '0.9rem' }}>No active sessions found.</p>}
+                            {sessions.map(s => (
+                                <div key={s.id} onClick={() => handleSelectSession(s)} className={`glass-panel ${selectedSessionId === s.id ? 'border-accent' : ''}`} style={{ padding: '1rem', marginBottom: '0.75rem', cursor: 'pointer', border: selectedSessionId === s.id ? '2px solid #6366f1' : '1px solid rgba(255,255,255,0.1)' }}>
+                                    <div style={{ fontWeight: 600 }}>{s.subject}</div>
+                                    <div style={{ fontSize: '0.85rem', color: '#64748b' }}>{s.classroomName}</div>
                                 </div>
-                                <div id="reader" style={{ marginTop: '1rem' }}></div>
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
+                            ))}
+                        </div>
+
+                        {/* Attendance History */}
+                        <div>
+                            <h3 style={{ color: '#94a3b8', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <History size={16} /> Recent History
+                            </h3>
+                            <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                                {history.length === 0 && <p style={{ color: '#64748b', fontSize: '0.9rem' }}>No attendance records.</p>}
+                                {history.map(record => (
+                                    <div key={record.id} className="glass-panel" style={{ padding: '10px', marginBottom: '8px', borderLeft: '3px solid #34d399' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                                            <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{record.sessionSubject || 'Unknown Subject'}</div>
+                                            <div style={{ fontSize: '0.7rem', opacity: 0.6, background: 'white', color: 'black', padding: '2px 6px', borderRadius: '4px' }}>{record.status.split(' ')[0]}</div>
+                                        </div>
+                                        <div style={{ fontSize: '0.8rem', color: '#94a3b8', display: 'flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
+                                            <Calendar size={10} /> {record.timestamp?.toDate ? new Date(record.timestamp.toDate()).toLocaleDateString() : 'Just now'}
+                                            <Clock size={10} style={{ marginLeft: '8px' }} /> {record.timestamp?.toDate ? new Date(record.timestamp.toDate()).toLocaleTimeString() : ''}
+                                        </div>
+                                        <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '2px' }}>{record.classroomName || 'Unknown Classroom'}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
                 </div>
             )}
         </div>
