@@ -13,6 +13,7 @@ interface User {
 
 interface AuthContextType {
     user: User | null;
+    deviceId: string;
     loginWithCredentials: (email: string, pass: string) => Promise<void>;
     logout: () => void;
     loading: boolean;
@@ -23,8 +24,17 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
     const [user, setUser] = useState<User | null>(null);
     const [loading, setLoading] = useState(true);
+    const [deviceId, setDeviceId] = useState('');
 
     useEffect(() => {
+        // Device Binding Init
+        let did = localStorage.getItem('smart_attendance_device_id');
+        if (!did) {
+            did = 'dev_' + Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+            localStorage.setItem('smart_attendance_device_id', did);
+        }
+        setDeviceId(did);
+
         const saved = localStorage.getItem('user');
         if (saved) {
             setUser(JSON.parse(saved));
@@ -64,7 +74,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     };
 
     return (
-        <AuthContext.Provider value={{ user, loginWithCredentials, logout, loading }}>
+        <AuthContext.Provider value={{ user, deviceId, loginWithCredentials, logout, loading }}>
             {!loading && children}
         </AuthContext.Provider>
     );

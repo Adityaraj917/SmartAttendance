@@ -25,6 +25,8 @@ interface Session {
     isActive: boolean;
     bleServiceUUID?: string;
     classroomLocation: { lat: number, lon: number, radius: number };
+    heartbeatNonce?: string;
+    heartbeatAt?: any;
 }
 
 interface AttendanceRecord {
@@ -187,6 +189,46 @@ export default function TeacherDashboard() {
         }
     };
 
+    // Heartbeat Emitter (Runs every 10 minutes)
+    useEffect(() => {
+        if (!session?.id || !session.isActive) return;
+
+        const emitHeartbeat = async () => {
+            try {
+                const nonce = Math.random().toString(36).substring(2, 12);
+                await updateDoc(doc(db, "sessions", session.id), {
+                    heartbeatNonce: nonce,
+                    heartbeatAt: serverTimestamp()
+                });
+                console.log(`Heartbeat emitted: ${nonce}`);
+            } catch (e) {
+                console.error("Failed to emit heartbeat", e);
+            }
+        };
+
+        // Emit immediately on load if needed or just wait for interval
+        // But better to emit one initially if missing? No, createSession does it.
+
+        const interval = setInterval(emitHeartbeat, 10 * 60 * 1000); // 10 mins
+
+        // Dynamic QR Rotation (Every 3 mins)
+        const qrInterval = setInterval(async () => {
+            try {
+                const newQr = Math.random().toString(36).substring(2, 12);
+                await updateDoc(doc(db, "sessions", session.id), {
+                    currentQrCode: newQr
+                });
+            } catch (e) {
+                console.error("QR Rotation failed", e);
+            }
+        }, 3 * 60 * 1000);
+
+        return () => {
+            clearInterval(interval);
+            clearInterval(qrInterval);
+        };
+    }, [session?.id, session?.isActive]);
+
     const endSession = async () => {
         if (!session) return;
         if (confirm('End this session?')) {
@@ -343,6 +385,11 @@ export default function TeacherDashboard() {
                                 <div style={{ marginTop: '8px', padding: '8px 16px', borderRadius: '12px', background: 'rgba(255,255,255,0.05)', fontSize: '0.9rem', color: '#94a3b8' }}>
                                     BLE UUID: <span style={{ color: '#fbbf24', fontFamily: 'monospace', fontSize: '0.8rem' }}>{session.bleServiceUUID || 'N/A'}</span>
                                 </div>
+                                {session.heartbeatNonce && (
+                                    <div style={{ marginTop: '8px', fontSize: '0.8rem', color: '#64748b' }}>
+                                        Heartbeat Nonce: <span style={{ color: '#34d399', fontFamily: 'monospace' }}>{session.heartbeatNonce}</span>
+                                    </div>
+                                )}
                             </div>
 
                             <div style={{ padding: '2rem', borderTop: '1px solid rgba(255,255,255,0.05)' }}>

@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
-import { KeyRound, Mail, Loader2, Grip, CheckCircle2 } from 'lucide-react';
+import { KeyRound, Mail, Loader2, Grip, CheckCircle2, Database } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { doc, writeBatch, collection } from 'firebase/firestore';
+import { db } from '../lib/firebase';
 
 export default function Login() {
     const [email, setEmail] = useState('');
@@ -37,8 +39,60 @@ export default function Login() {
         }
     };
 
-    const fillTeacher = () => { setEmail('Piram@VGU'); setPassword('Piram@123'); };
+    const fillTeacher = () => { setEmail('PirAhmad@VGU'); setPassword('PirAhmad@123'); };
     const fillStudent = () => { setEmail('Aditya@VGU'); setPassword('Aditya@123'); };
+
+    const seedUsers = async () => {
+        if (!confirm('This will RESET/OVERWRITE users. Continue?')) return;
+        setLoading(true);
+        try {
+            const batch = writeBatch(db);
+
+            const students = ['Aditya', 'Sachin', 'Arya', 'Ayush', 'Pruthvi', 'Souvik'];
+            students.forEach(name => {
+                const ref = doc(db, 'users', `${name}@VGU`);
+                batch.set(ref, {
+                    name,
+                    email: `${name}@VGU`,
+                    password: `${name}@123`,
+                    role: 'STUDENT',
+                    createdAt: new Date()
+                });
+            });
+
+            const teachers = ['Pir Ahmad', 'Qatib', 'Satish'];
+            teachers.forEach(name => {
+                const safeName = name.replace(/\s/g, '');
+                const email = `${safeName}@VGU`;
+                const ref = doc(db, 'users', email);
+                batch.set(ref, {
+                    name,
+                    email,
+                    password: `${safeName}@123`,
+                    role: 'TEACHER',
+                    createdAt: new Date()
+                });
+
+                // Also Create a default classroom for teachers
+                const classRef = doc(collection(db, 'classrooms'));
+                batch.set(classRef, {
+                    name: 'Main Hall',
+                    latitude: 26.9363, // Example VGU coords
+                    longitude: 75.9235,
+                    radiusMeters: 50,
+                    teacherId: email
+                });
+            });
+
+            await batch.commit();
+            alert('Users seeded successfully!');
+        } catch (e: any) {
+            console.error(e);
+            alert('Seeding failed: ' + e.message);
+        } finally {
+            setLoading(false);
+        }
+    };
 
     return (
         <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' }}>
@@ -110,12 +164,15 @@ export default function Login() {
                     <p style={{ fontSize: '0.8rem', color: '#64748b', textAlign: 'center', marginBottom: '1rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Quick Login (Demo)</p>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                         <div onClick={fillTeacher} style={{ padding: '10px', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', cursor: 'pointer', textAlign: 'center', fontSize: '0.85rem', color: '#94a3b8', border: '1px solid transparent', transition: 'all 0.2s' }} className="hover:bg-white/5 hover:border-white/10">
-                            Teacher (Piram)
+                            Teacher (Pir Ahmad)
                         </div>
                         <div onClick={fillStudent} style={{ padding: '10px', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', cursor: 'pointer', textAlign: 'center', fontSize: '0.85rem', color: '#94a3b8' }} className="hover:bg-white/5 hover:border-white/10">
                             Student (Aditya)
                         </div>
                     </div>
+                    <button onClick={seedUsers} style={{ width: '100%', marginTop: '1rem', background: 'transparent', border: '1px dashed #4b5563', color: '#64748b', fontSize: '0.8rem', padding: '8px', cursor: 'pointer', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                        <Database size={12} /> Reset/Seed Database
+                    </button>
                 </div>
             </motion.div>
         </div>
